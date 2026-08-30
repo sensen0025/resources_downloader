@@ -1,0 +1,36 @@
+# 凭证与本地配置
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+
+# 合成验证码评测数据
+bench_data/
+
+# 注册器保存的账号凭证
+accounts/credentials.json
+
+# 登录态 Cookie(账号敏感信息,不入库)
+accounts/cookies/
+
+# 系统
+.DS_Store
+Thumbs.db
+
+# 本地数据与下载产物
+downloads/
+data/
+*.log
+*.part
+
+# 临时测试与运行脚本
+_run*
+_test*
+
+# Deploy Key (核心安全: 绝对不能提交私钥!)
+github_deploy_key
+github_deploy_key.pub
