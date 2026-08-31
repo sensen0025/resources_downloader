@@ -31,6 +31,9 @@ data/
 _run*
 _test*
 
+# 一次性/调试脚本与部署私钥归档
+scripts/archive/
+
 # Deploy Key (核心安全: 绝对不能提交私钥!)
 github_deploy_key
 github_deploy_key.pub

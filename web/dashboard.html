@@ -3,163 +3,169 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Resource Hub 控制台</title>
+<title>Resource Hub Console</title>
 <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
 <header class="topbar">
-  <div class="brand">🛰️ Resource Hub <span class="sub">下载控制台</span></div>
+  <div class="brand">Resource Hub <span class="sub">Console</span></div>
   <div class="status-pills" id="statusPills">
     <span class="pill" data-k="llm">LLM <b>…</b></span>
-    <span class="pill" data-k="mail">邮箱 <b>…</b></span>
-    <span class="pill" data-k="proxy">代理 <b>…</b></span>
-    <span class="pill" data-k="token">令牌 <b>…</b></span>
-    <span class="pill" data-k="clamav">查毒 <b>…</b></span>
+    <span class="pill" data-k="mail">Email <b>…</b></span>
+    <span class="pill" data-k="proxy">Proxy <b>…</b></span>
+    <span class="pill" data-k="token">Auth <b>…</b></span>
+    <span class="pill" data-k="clamav">Security <b>…</b></span>
   </div>
-  <button class="btn ghost" id="loginBtn">令牌登录</button>
+  <span class="web-badge">Web Session</span>
 </header>
 
 <nav class="tabs">
-  <button class="tab active" data-tab="download">⬇️ 下载</button>
-  <button class="tab" data-tab="history">📋 历史</button>
-  <button class="tab" data-tab="settings">⚙️ 配置</button>
-  <button class="tab" data-tab="tokens">🔑 令牌</button>
-  <button class="tab" data-tab="scan">🛡️ 查毒</button>
+  <button class="tab active" data-tab="download">Download</button>
+  <button class="tab" data-tab="history">History</button>
+  <button class="tab" data-tab="settings">Settings</button>
+  <button class="tab" data-tab="tokens">API Keys</button>
+  <button class="tab" data-tab="scan">Security</button>
 </nav>
 
 <main>
-  <!-- ============ 下载 ============ -->
+  <!-- ============ Download Tab ============ -->
   <section id="tab-download" class="tab-page active">
-    <div class="card">
-      <h3>提交资源下载任务</h3>
-      <div class="form-row">
-        <input id="dlQuery" class="input grow" placeholder="要下载什么? 如: 蛊真人壁纸 / 周杰伦 FLAC / 故宫 投影 litematic">
+    <div class="hero">
+      <h1>Search & Download</h1>
+      <p class="hero-sub">Enter a query to automatically search, download, scan, and retrieve files or links.</p>
+      <textarea id="dlQuery" class="prompt-input" rows="2"
+        placeholder="e.g., 凡人修仙传 第10集 下载 / 觅长生 破解版 网盘 / 鬼谷八荒 修改器 exe / 临渊行 漫画 第一节"></textarea>
+      <div class="form-row center">
         <select id="dlKind" class="input">
-          <option value="auto">自动判断类型</option>
-          <option value="image">🖼️ 图片/壁纸</option>
-          <option value="audio">🎵 音频</option>
-          <option value="video">🎬 视频</option>
-          <option value="document">📄 文档/电子书</option>
-          <option value="schematic">🧱 投影/蓝图</option>
+          <option value="auto">Auto Detect</option>
+          <option value="image">Image / Wallpaper</option>
+          <option value="audio">Audio</option>
+          <option value="video">Video / Anime</option>
+          <option value="document">Document / Book</option>
+          <option value="schematic">Schematic / Blueprint</option>
         </select>
+        <input id="dlEmail" class="input grow" placeholder="Login Email (Optional, automated verification codes)">
+        <button class="btn primary big" id="dlSubmit">Fetch</button>
+        <button class="btn" id="dlCancel" disabled>Cancel</button>
       </div>
-      <div class="form-row">
-        <input id="dlEmail" class="input grow" placeholder="需登录站点时的邮箱(可选,Agent 自动收验证码)">
-        <input id="dlCallback" class="input grow" placeholder="Webhook 回调 URL(可选)">
+      <div class="chips" id="dlChips">
+        <button class="chip" data-q="凡人修仙传 第10集">凡人修仙传 第10集</button>
+        <button class="chip" data-q="觅长生 破解版 网盘链接">觅长生 破解版 网盘</button>
+        <button class="chip" data-q="鬼谷八荒 修改器 exe">鬼谷八荒 修改器 exe</button>
+        <button class="chip" data-q="周杰伦 FLAC 无损下载">周杰伦 FLAC 无损</button>
+        <button class="chip" data-q="故宫 投影 litematic">故宫 投影 litematic</button>
       </div>
-      <div class="form-row">
-        <button class="btn primary" id="dlSubmit">🚀 提交任务</button>
-        <button class="btn" id="dlCancel" disabled>✋ 取消</button>
-      </div>
-      <p class="hint" id="dlHint">提示: 音频/视频大文件自动走流式下载(分段并发/HLS), 下载后自动查毒。</p>
     </div>
 
     <div class="card" id="dlProgress" hidden>
-      <h3>任务进度 <span id="dlTaskId" class="mono"></span></h3>
+      <h3>Task Progress <span id="dlTaskId" class="mono"></span></h3>
       <div class="stage-row">
         <span id="dlStage" class="badge">queued</span>
         <span id="dlStageMsg" class="stage-msg"></span>
       </div>
       <div class="bar"><div id="dlBar" class="bar-fill" style="width:0%"></div></div>
-      <pre id="dlEvents" class="event-log"></pre>
+      <details><summary>Logs</summary><pre id="dlEvents" class="event-log"></pre></details>
+    </div>
+
+    <div class="card" id="dlPanCard" hidden>
+      <h3>Cloud Storage Links <span id="dlPanCount" class="mono"></span></h3>
+      <p class="hint">Detected cloud storage links. Click to copy or open in your browser.</p>
+      <div id="dlPanLinks" class="pan-grid"></div>
+    </div>
+
+    <div class="card" id="dlFilesCard" hidden>
+      <h3>Downloaded Files <span id="dlFilesCount" class="mono"></span></h3>
+      <p class="hint">Files are verified, scanned, and ready to download locally.</p>
       <div id="dlFiles" class="file-grid"></div>
     </div>
   </section>
 
-  <!-- ============ 历史 ============ -->
+  <!-- ============ History Tab ============ -->
   <section id="tab-history" class="tab-page">
     <div class="card">
-      <h3>任务历史 <button class="btn ghost sm" id="histRefresh">刷新</button></h3>
+      <h3>Task History <button class="btn ghost sm" id="histRefresh">Refresh</button></h3>
       <table class="tbl" id="histTable">
-        <thead><tr><th>任务</th><th>查询</th><th>状态</th><th>进度</th><th>文件</th><th>创建时间</th></tr></thead>
+        <thead><tr><th>Task ID</th><th>Query</th><th>Status</th><th>Progress</th><th>Files</th><th>Created At</th></tr></thead>
         <tbody></tbody>
       </table>
     </div>
     <div class="card" id="histDetail" hidden>
       <h3 id="histDetailTitle"></h3>
       <pre id="histDetailBody" class="event-log"></pre>
+      <div class="card" id="histPan" hidden style="margin-top:10px">
+        <h3>Cloud Storage Links</h3>
+        <div class="pan-grid"></div>
+      </div>
       <div id="histDetailFiles" class="file-grid"></div>
     </div>
   </section>
 
-  <!-- ============ 配置 ============ -->
+  <!-- ============ Settings Tab ============ -->
   <section id="tab-settings" class="tab-page">
     <div class="card">
-      <h3>⚙️ 配置(保存立即生效,写入 .env)</h3>
+      <h3>Settings</h3>
       <div class="cfg-group">
-        <div class="cfg-title">🤖 LLM(AI 决策/视觉)</div>
+        <div class="cfg-title">Large Language Model</div>
         <div class="form-row"><label>API Key</label><input id="cfg_llm_api_key" class="input" placeholder="sk-..."></div>
         <div class="form-row"><label>Base URL</label><input id="cfg_llm_base_url" class="input" placeholder="https://api.deepseek.com/v1"></div>
-        <div class="form-row"><label>模型</label><input id="cfg_llm_model" class="input" placeholder="deepseek-v4-flash"></div>
+        <div class="form-row"><label>Model</label><input id="cfg_llm_model" class="input" placeholder="deepseek-v4-flash"></div>
       </div>
       <div class="cfg-group">
-        <div class="cfg-title">📮 邮箱(IMAP 收验证码)</div>
-        <div class="form-row"><label>IMAP 主机</label><input id="cfg_mail_imap_host" class="input" placeholder="imap.qq.com"></div>
-        <div class="form-row"><label>端口</label><input id="cfg_mail_imap_port" class="input" placeholder="993"></div>
-        <div class="form-row"><label>邮箱</label><input id="cfg_mail_email" class="input" placeholder="you@example.com"></div>
-        <div class="form-row"><label>授权码</label><input id="cfg_mail_password" class="input" type="password" placeholder="16 位授权码(非登录密码)"></div>
+        <div class="cfg-title">IMAP Email Service</div>
+        <div class="form-row"><label>IMAP Host</label><input id="cfg_mail_imap_host" class="input" placeholder="imap.qq.com"></div>
+        <div class="form-row"><label>Port</label><input id="cfg_mail_imap_port" class="input" placeholder="993"></div>
+        <div class="form-row"><label>Email</label><input id="cfg_mail_email" class="input" placeholder="you@example.com"></div>
+        <div class="form-row"><label>Auth Code</label><input id="cfg_mail_password" class="input" type="password" placeholder="16-character authorization code"></div>
       </div>
       <div class="cfg-group">
-        <div class="cfg-title">🌐 代理(VPN,可选)</div>
-        <div class="form-row"><label>RH_PROXY_URL</label><input id="cfg_proxy_url" class="input" placeholder="http://proxy.mornai.cn:7890(留空=直连)"></div>
+        <div class="cfg-title">Network Proxy (Optional)</div>
+        <div class="form-row"><label>RH_PROXY_URL</label><input id="cfg_proxy_url" class="input" placeholder="http://proxy.mornai.cn:7890 (leave empty for direct connection)"></div>
       </div>
       <div class="cfg-group">
-        <div class="cfg-title">🔐 令牌认证(可选)</div>
-        <div class="form-row"><label>RH_API_SECRET</label><input id="cfg_api_secret" class="input" type="password" placeholder="设置后所有接口需 Bearer 令牌(先申请再设!)"></div>
-        <p class="hint">⚠️ 启用令牌模式前,请先到「令牌」页申请并保存好 token_key;启用后本页面需用该令牌登录。</p>
+        <div class="cfg-title">Token Authentication (Optional)</div>
+        <div class="form-row"><label>RH_API_SECRET</label><input id="cfg_api_secret" class="input" type="password" placeholder="Set to enforce Bearer token authentication for all API endpoints"></div>
+        <p class="hint">Warning: Set up and save your API Token before enabling this mode to prevent locking yourself out.</p>
       </div>
       <div class="form-row">
-        <button class="btn primary" id="cfgSave">💾 保存配置</button>
-        <button class="btn" id="cfgTestLlm">🧪 测试 LLM</button>
+        <button class="btn primary" id="cfgSave">Save Settings</button>
+        <button class="btn secondary" id="cfgTestLlm">Test Connection</button>
         <span id="cfgMsg" class="stage-msg"></span>
       </div>
     </div>
   </section>
 
-  <!-- ============ 令牌 ============ -->
+  <!-- ============ Tokens Tab ============ -->
   <section id="tab-tokens" class="tab-page">
     <div class="card">
-      <h3>申请令牌(每人独立,明文仅显示一次)</h3>
+      <h3>Apply API Token</h3>
+      <p class="hint">Generate an API token for programmatic client access (cURL, scripts, etc.).</p>
       <div class="form-row">
-        <input id="tokName" class="input grow" placeholder="令牌名称,如: 项目A-生产">
-        <button class="btn primary" id="tokApply">🔑 申请</button>
+        <input id="tokName" class="input grow" placeholder="Token Name, e.g., Production-Server">
+        <button class="btn primary" id="tokApply">Generate</button>
       </div>
       <pre id="tokNewKey" class="token-key" hidden></pre>
     </div>
     <div class="card">
-      <h3>我的令牌</h3>
+      <h3>Active Tokens</h3>
       <table class="tbl" id="tokTable">
-        <thead><tr><th>ID</th><th>名称</th><th>状态</th><th>创建</th><th>最后使用</th><th>操作</th></tr></thead>
+        <thead><tr><th>ID</th><th>Name</th><th>Status</th><th>Created</th><th>Last Used</th><th>Actions</th></tr></thead>
         <tbody></tbody>
       </table>
     </div>
   </section>
 
-  <!-- ============ 查毒 ============ -->
+  <!-- ============ Security Tab ============ -->
   <section id="tab-scan" class="tab-page">
     <div class="card">
-      <h3>🛡️ 文件查毒(ClamAV + YARA + 启发式)</h3>
+      <h3>Security Scan</h3>
       <div class="form-row">
-        <input id="scanPath" class="input grow" placeholder="服务器上的文件/目录路径,如 downloads/xxx.mp4">
-        <button class="btn primary" id="scanBtn">🔬 扫描</button>
+        <input id="scanPath" class="input grow" placeholder="Server file/directory path, e.g., downloads/video.mp4">
+        <button class="btn primary" id="scanBtn">Scan</button>
       </div>
       <div id="scanResult" hidden></div>
     </div>
   </section>
 </main>
-
-<!-- 登录弹窗(令牌模式) -->
-<div id="loginModal" class="modal" hidden>
-  <div class="modal-box">
-    <h3>令牌登录</h3>
-    <input id="loginToken" class="input" placeholder="粘贴 token_key(rh_live_...)">
-    <div class="form-row">
-      <button class="btn primary" id="loginOk">登录</button>
-      <button class="btn ghost" id="loginCancel">取消</button>
-    </div>
-    <p class="hint">令牌在「令牌」页申请;个人模式(未设 RH_API_SECRET)无需登录。</p>
-  </div>
-</div>
 
 <div id="toast" class="toast" hidden></div>
 <script src="/static/app.js"></script>
