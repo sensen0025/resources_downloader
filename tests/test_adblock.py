@@ -1,6 +1,8 @@
 """广告过滤数据池(skills/adblock)单元测试。"""
 
+import tempfile
 import unittest
+from pathlib import Path
 
 from skills.adblock import (
     ad_penalty,
@@ -52,6 +54,45 @@ class TestPenalty(unittest.TestCase):
         self.assertGreater(ad_penalty("https://x.com/ad/1"), 1.0)
         self.assertGreater(ad_penalty("https://x.com/video/1", "广告 推广"), 0.0)
         self.assertEqual(ad_penalty("https://x.com/video/1"), 0.0)
+
+
+class TestPool(unittest.TestCase):
+    """开源数据池(rules.json)加载与合并。"""
+
+    def setUp(self):
+        import skills.adblock.rules as R
+
+        self._orig_path = R._POOL_PATH
+        R._POOL_PATH = Path(tempfile.mkdtemp()) / "rules.json"
+
+    def tearDown(self):
+        import skills.adblock.rules as R
+
+        R._POOL_PATH = self._orig_path
+        R._pool = None
+
+    def test_pool_merge(self):
+        import json
+
+        import skills.adblock.rules as R
+
+        R._POOL_PATH.write_text(json.dumps({
+            "domains": ["poolad.example.com", "another.poolad.net"],
+            "patterns": ["/poolad-path/"],
+            "whitelist": ["ok.whitelist.example.com"],
+        }), encoding="utf-8")
+        self.assertTrue(is_ad_domain("https://poolad.example.com/x"))
+        self.assertTrue(is_ad_domain("https://sub.another.poolad.net/x"))
+        self.assertTrue(is_ad_url("https://x.com/a/poolad-path/b"))
+        # 白名单优先
+        self.assertFalse(is_ad_domain("https://ok.whitelist.example.com/x"))
+        self.assertEqual(R.pool_stats()["domains"], 2)
+
+    def test_missing_pool_is_noop(self):
+        import skills.adblock.rules as R
+
+        self.assertEqual(R.pool_stats(), {"domains": 0, "patterns": 0})
+        self.assertFalse(is_ad_domain("https://example.com/x"))  # 内置规则不受影响
 
 
 class TestFilter(unittest.TestCase):

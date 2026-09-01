@@ -1,0 +1,7 @@
+{
+  "name": "security",
+  "version": "0.1.0",
+  "description": "下载查毒:ClamAV+YARA+启发式",
+  "tools": ["scan_file"],
+  "requires": []
+}

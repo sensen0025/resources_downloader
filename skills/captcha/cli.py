@@ -64,7 +64,33 @@ def _build_parser() -> argparse.ArgumentParser:
     add_common(pb)
     pb.add_argument("folder", help="图片文件夹")
     pb.add_argument("--raw-baseline", action="store_true", help="同时跑原始 ddddocr(无预处理)作对照")
+
+    psd = sub.add_parser("slide", help="滑块验证码:检测缺口中心 x 坐标")
+    psd.add_argument("target", help="缺口图(小图)")
+    psd.add_argument("background", help="背景图(大图)")
+    psd.add_argument("--json", action="store_true")
     return p
+
+
+def cmd_slide(args: argparse.Namespace) -> int:
+    from .slide import SLIDE_BACKENDS, detect_slide_gap
+
+    try:
+        target = Path(args.target).read_bytes()
+        bg = Path(args.background).read_bytes()
+    except OSError as e:
+        print(f"读取图片失败: {e}", file=sys.stderr)
+        return 2
+    gap = detect_slide_gap(target, bg)
+    if gap is None:
+        print("检测失败: 需要 ddddocr 或 opencv(两者都未安装)", file=sys.stderr)
+        return 1
+    if args.json:
+        print(json.dumps({"gap_x": gap, "backend": SLIDE_BACKENDS[-1] if SLIDE_BACKENDS else "?"}))
+        return 0
+    print(f"缺口中心 x = {gap}px (后端: {SLIDE_BACKENDS[-1] if SLIDE_BACKENDS else '?'})")
+    print(f"拖拽距离 = 缺口x - 滑块起点x(滑块起点由页面定位)")
+    return 0
 
 
 def cmd_solve(args: argparse.Namespace) -> int:
@@ -171,6 +197,8 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_solve(args)
     if args.command == "bench":
         return cmd_bench(args)
+    if args.command == "slide":
+        return cmd_slide(args)
     return 2
 
 

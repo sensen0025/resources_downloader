@@ -1,0 +1,7 @@
+{
+  "name": "novel",
+  "version": "0.1.0",
+  "description": "小说章节爬虫拼接器:章节目录→逐章正文→合并单体txt",
+  "tools": ["fetch_novel_txt"],
+  "requires": []
+}

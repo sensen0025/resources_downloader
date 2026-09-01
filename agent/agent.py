@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import re
+import time
 from dataclasses import dataclass, field
 from types import SimpleNamespace
 from typing import Callable, Optional
@@ -28,6 +29,10 @@ ACTIONS = {
 }
 # 技能类动作(来自注册表,参数 schema 校验后执行)
 TOOL_ACTIONS = frozenset(_tools.registered_names())
+
+# 连续「工具参数不合法」熔断阈值:LLM 反复漏填必填字段时及时止损,
+# 不把预算耗在同样的 schema 错误上(线上事故:一轮任务 4 次缺参空转)
+_MAX_INVALID_ARGS = 2
 
 SYSTEM_PROMPT = """你是一个网页自动化 Agent,正在执行一个账号注册/登录任务。
 规则:
@@ -50,7 +55,7 @@ SYSTEM_PROMPT = """你是一个网页自动化 Agent,正在执行一个账号注
      "Just a moment" 拦截时设 use_session=true 走浏览器会话(已自动处理 CF)
    - screenshot: 截图(视觉确认页面状态)
    - read_body: 读取页面可见文本
-   - human: 需要人工介入时使用(value=向用户提的问题)
+   - human: 需要人工介入时使用(args: {"question": "向用户提的问题"})
    - done: 任务完成或无法继续(value=总结,args: {"success": true/false})
 4. 邮箱验证:页面提示"验证码/链接已发送到邮箱"后,用 mail_code 等邮件。
    Claude 的邮件是「安全登录链接」(发件人含 anthropic.com),不含数字验证码 ——
@@ -70,9 +75,41 @@ SYSTEM_PROMPT = """你是一个网页自动化 Agent,正在执行一个账号注
 5.7 下载:普通 download 返回 403/拦截时,改用 download 工具并设 use_session=true
     (走浏览器会话,带上已通过的 Cloudflare/登录 Cookie)。
 6. 安全:只在任务指定域内操作;绝不提交付费、绝不下载与任务无关的文件。
+6.5 聚焦:你的任务只针对目标 URL 及其所在站点。候选列表/搜索结果里的其他站点交给各自的
+    Agent 尝试,**不要**在脚本或工具里访问其他候选站点,不要写脚本去抓别的站的接口;
+    专用工具只能用于对应站点(bilibili_fetch 仅限 bilibili.com 页面调用)。
+    若发现页面 URL 已偏离目标站点域(如误跳转到无关视频/文章页),用 goto 回到目标 URL 再继续。
 7. 如果页面标题是 "Just a moment..." 或页面显示 Cloudflare 校验:说明在做浏览器校验,
    用 wait(5000~10000ms) 等它完成,校验通过后页面会正常加载;最多等 5 次,仍不行再 done(success=false)。
-8. 预算:你最多有 __MAX_STEPS__ 步,每步都要推进任务。重复动作超过 3 次视为卡住,应换策略或 done(success=false)。"""
+8. 预算:你最多有 __MAX_STEPS__ 步,每步都要推进任务。重复动作超过 3 次视为卡住,应换策略或 done(success=false);
+   工具参数不合法(如缺必填字段)连续 2 次视为同样的 schema 错误,直接 done(success=false),
+   不要反复用缺参的工具调用空转。
+9. 搜索引擎中转/跳转页(URL 含 so.com/link、baidu.com/link、bing.com/ck 等,URL 可能超长含乱码参数):
+   **不要**重新编码或重复 goto 该 URL(参数已加密,人工还原必然出错);先用 wait(3000~5000ms)
+   等页面 JS 自动跳转到真实站点,再重新观察;观察到的 URL/标题变化后再继续找资源。
+10. 阅读平台的 SEO 引导页(URL 含 bookquery/kol-rec/chapter/bookrecommend 等):页面上的
+    「TXT下载/全集下载」按钮通常指向**另一张同类书页**而不是文件。若连续点击下载按钮后
+    仍在同一站点的书页/章节页之间跳转(URL 仍是 bookquery/chapter),说明是 SEO 引导迷宫,
+    停止点击,直接 done(success=false),不要浪费时间。
+11. 站点信誉:用 site_lookup 查询历史 AI 对站点的评分(0-9)与短描述(向量相似度 top-k)。
+    选择访问/下载目标时优先高分站(≥6);避开低分站(≤2)或描述含"虚假/HTML 冒充/登录墙"
+    的站 —— 历史教训:这些站只会空耗预算。站点出现在搜索结果里但信誉库评分很低时,
+    直接跳过它找下一个候选。
+12. B站(bilibili.com/video 或 /bangumi)页面:调用 bilibili_fetch 工具(参数 url 必填,勿缺参)——
+    它会用当前浏览器会话(已过 B站反爬 412)从页面 playinfo 读 DASH 流:视频任务自动下载视频流
+    并与音频合并为 mp4;纯音乐任务可设 prefer=audio 只下音频。不要点页面上的「下载」按钮
+    (那是 APP 客户端),不要尝试裸 HTTP 抓页面(必 412)。
+13. 沙盒工具(sandbox_read/write/python/run):当规则技能搞不定某站(签名 API、加密流、
+    特殊格式),自己写脚本解决 —— 用 sandbox_write 写脚本 → sandbox_python/run 执行 →
+    sandbox_read 看输出 → 迭代直到拿到直链/文件。脚本需要过反爬时,读沙盒里的
+    `_session_cookies.json`(浏览器会话 cookie 的 JSON dict),用
+    requests.get(url, cookies=json.load(open('_session_cookies.json'))) 带上。
+    **只在任务目录内读写,禁止触碰服务器其他文件;禁止删除任务文件;脚本不得访问
+    .env/密钥;别跑危险命令(会被拦截)。** 写文件注意:任务完成后文件会被收集交付,
+    脚本/中间产物可留但命名要清晰。
+14. 图片/壁纸资源:必须拿原图/高清直链。URL 含 /thumbnail/ /small/ /thumb 等缩略图
+    路径时,先尝试替换为 /large/ /mw1024/ /source/ /origin 等原图路径再下载;
+    几 KB 的缩略图不算合格的壁纸,不要以缩略图宣布完成。"""
 
 
 @dataclass
@@ -89,6 +126,7 @@ class AgentResult:
     summary: str
     steps: list = field(default_factory=list)
     final_url: str = ""
+    final_title: str = ""   # 最后观察到的页面标题(皮肤任务名字匹配验收用)
 
 
 class AccountAgent:
@@ -99,6 +137,7 @@ class AccountAgent:
         goal: str,
         allowed_domain: str = "",
         max_steps: int = 30,
+        max_seconds: Optional[float] = None,   # 时间预算:超过即终止本候选(防"卡死")
         verbose: bool = True,
         progress: Optional[Callable[[str], None]] = None,
     ) -> None:
@@ -107,6 +146,7 @@ class AccountAgent:
         self.goal = goal
         self.allowed_domain = allowed_domain
         self.max_steps = max_steps
+        self.max_seconds = max_seconds
         self.verbose = verbose
         self.progress = progress
         self.perception = Perception(session)
@@ -118,13 +158,25 @@ class AccountAgent:
         if self.verbose:
             print(msg, flush=True)
         if self.progress:
-            self.progress(msg)
+            try:
+                self.progress(msg)
+            except Exception:
+                pass  # 进度回调失败不影响 Agent 主循环
 
     # ------------------------------------------------------------ 主循环
 
     def run(self) -> AgentResult:
         repeated: dict[str, int] = {}
+        parse_fails = 0  # 连续 LLM 决策解析失败计数(防死循环空转)
+        invalid_args = 0  # 连续工具参数不合法计数(缺必填字段熔断)
+        started = time.monotonic()
+        self._last_title = ""
         for step in range(1, self.max_steps + 1):
+            if self.max_seconds is not None and time.monotonic() - started > self.max_seconds:
+                self._log(f"[预算] 超过时间预算 {self.max_seconds:.0f}s,终止本候选")
+                return AgentResult(False, f"超过时间预算 {self.max_seconds:.0f}s",
+                                   self.history, self.session.current_url(),
+                                   self._last_title)
             self._log(f"\n--- 步骤 {step}/{self.max_steps} ---")
             obs = self.perception.observe()
             if not obs.elements:
@@ -132,13 +184,26 @@ class AccountAgent:
                 self._log("[观察] 无可交互元素,等待页面加载...")
                 self.session.wait(2500)
                 obs = self.perception.observe()
+            self._last_title = obs.title
             self._log(f"[观察] {obs.url} | {obs.title} | 元素 {len(obs.elements)} 个")
 
             decision = self._decide(obs)
             if decision is None:
+                parse_fails += 1
+                if parse_fails >= 3:
+                    self._log("[LLM] 连续 3 次决策解析失败,终止本候选(多为超长 URL 截断)")
+                    return AgentResult(False, "连续决策解析失败", self.history, obs.url,
+                                       self._last_title)
                 self._log("[LLM] 决策解析失败,等待后重试")
                 self.session.wait(2000)
                 continue
+            parse_fails = 0
+
+            # AI 自汇报:把模型自己的推理(thought)推给进度流(SSE/任务日志),
+            # 用户能看到 AI 为什么这么做,而不是干等
+            thought = str(decision.get("thought") or "").strip().replace("\n", " ")
+            if thought:
+                self._log(f"[AI] {thought}")
 
             action = decision.get("action", "")
             if action not in ACTIONS and action not in TOOL_ACTIONS:
@@ -156,17 +221,34 @@ class AccountAgent:
                 repeated[key] = repeated.get(key, 0) + 1
                 if repeated[key] >= 3:
                     self._log("[卡住] 同一动作重复 3 次,终止")
-                    return AgentResult(False, f"卡住: 重复动作 {key} 3 次", self.history, obs.url)
+                    return AgentResult(False, f"卡住: 重复动作 {key} 3 次", self.history,
+                                       obs.url, self._last_title)
+
+            # 工具参数不合法熔断:LLM 反复漏填必填字段(缺 url/path/code/content 等)
+            # 时,每次白烧一整轮 LLM 调用 —— 连续 2 次直接止损,不继续空转。
+            if action in TOOL_ACTIONS:
+                if "参数不合法" in str(result):
+                    invalid_args += 1
+                    if invalid_args >= _MAX_INVALID_ARGS:
+                        self._log(
+                            f"[卡住] 连续 {invalid_args} 次工具参数不合法(缺必填字段),终止本候选")
+                        return AgentResult(
+                            False, f"工具参数连续不合法({invalid_args} 次): {str(result)[:100]}",
+                            self.history, obs.url, self._last_title)
+                else:
+                    invalid_args = 0
 
             self.history.append(StepRecord(step, f"{obs.url} | {obs.title}", decision, result))
             self._log(f"[动作] {action} {decision.get('index', '')} → {result.message[:200]}")
 
             if action == "done":
                 success = bool(decision.get("args", {}).get("success", False))
-                return AgentResult(success, decision.get("value", ""), self.history, obs.url)
+                return AgentResult(success, decision.get("value", ""), self.history,
+                                   obs.url, self._last_title)
 
         self._log(f"\n[预算] 达到最大步数 {self.max_steps},终止")
-        return AgentResult(False, "达到最大步数未完成", self.history, self.session.current_url())
+        return AgentResult(False, "达到最大步数未完成", self.history,
+                           self.session.current_url(), self._last_title)
 
     # ------------------------------------------------------------ 决策
 
@@ -204,8 +286,13 @@ class AccountAgent:
             "",
             "最近执行记录:",
         ]
-        for rec in self.history[-8:]:
-            lines.append(f"  步{rec.step}: 动作={rec.decision.get('action')} 结果={str(rec.result)[:120]}")
+        steps = self.history[-8:]
+        for i, rec in enumerate(steps):
+            # 最近一步的动作结果必须完整可见:analyze_page 返回的直链/图片 URL
+            # 常超 120 字符,历史截断会让 LLM 误以为"URL 被截断"而去写脚本空转
+            # (线上事故:壁纸任务因看不到完整 hdslb URL 陷入 sandbox 循环)
+            limit = 1500 if i == len(steps) - 1 else 120
+            lines.append(f"  步{rec.step}: 动作={rec.decision.get('action')} 结果={str(rec.result)[:limit]}")
         if not self.history:
             lines.append("  (无)")
         lines.append("")
@@ -254,20 +341,112 @@ class AccountAgent:
 
 
 def _parse_decision(text: str) -> dict:
-    """容错解析 LLM 的 JSON 决策。"""
-    text = text.strip()
-    try:
-        return json.loads(text)
-    except json.JSONDecodeError:
-        pass
-    m = re.search(r"\{.*\}", text, re.DOTALL)
-    if m:
+    """容错解析 LLM 的 JSON 决策(多层修复)。
+
+    覆盖:代码围栏、尾随垃圾文本、截断 JSON(补右括号/去悬空残缺键值)、
+    单引号 Python 字典风格。全部失败才抛 ValueError。
+    """
+    text = (text or "").strip()
+    candidates: list[str] = [text]
+
+    # 1) 去掉 ```json ... ``` 围栏
+    fence = re.sub(r"```(?:json)?", "", text).strip("` \n")
+    if fence and fence != text:
+        candidates.append(fence)
+
+    # 2) 首个完整 JSON 对象(字符串感知配平);截断则尝试补全
+    body = fence or text
+    obj = _extract_json_object(body)
+    if obj is not None:
+        candidates.append(obj)
+    else:
+        start = body.find("{")
+        if start >= 0:
+            for repaired in _repair_truncated(body[start:]):
+                candidates.append(repaired)
+
+    for cand in candidates:
         try:
-            return json.loads(m.group(0))
-        except json.JSONDecodeError:
-            pass
-    cleaned = re.sub(r"```(?:json)?", "", text).strip("` \n")
-    try:
-        return json.loads(cleaned)
-    except json.JSONDecodeError as exc:
-        raise ValueError(f"无法解析决策 JSON") from exc
+            return json.loads(cand)
+        except Exception:
+            continue
+
+    # 3) Python 字面量风格兜底:单引号 dict / True/False/None
+    #    (ast.literal_eval 只解析字面量,安全;JSON 标准不接受这些,最后才试)
+    import ast
+
+    for cand in candidates:
+        try:
+            v = ast.literal_eval(cand)
+            if isinstance(v, dict):
+                return v
+        except Exception:
+            continue
+    raise ValueError("无法解析决策 JSON")
+
+
+def _extract_json_object(text: str) -> Optional[str]:
+    """字符串感知括号配平:返回从第一个 '{' 开始、配平的 JSON 对象原文。
+    不配平(输出被截断)返回 None。"""
+    start = text.find("{")
+    if start < 0:
+        return None
+    depth = 0
+    in_str = esc = False
+    for i in range(start, len(text)):
+        ch = text[i]
+        if in_str:
+            if esc:
+                esc = False
+            elif ch == "\\":
+                esc = True
+            elif ch == '"':
+                in_str = False
+            continue
+        if ch == '"':
+            in_str = True
+        elif ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                return text[start:i + 1]
+    return None
+
+
+def _repair_truncated(prefix: str) -> list[str]:
+    """截断 JSON 修复:补右括号;再去掉悬空的残缺键值后补右括号。"""
+    out: list[str] = []
+    depth = 0
+    in_str = esc = False
+    for ch in prefix:
+        if in_str:
+            if esc:
+                esc = False
+            elif ch == "\\":
+                esc = True
+            elif ch == '"':
+                in_str = False
+            continue
+        if ch == '"':
+            in_str = True
+        elif ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+    if depth <= 0:
+        return out
+    out.append(prefix + "}" * depth)
+    # 末尾残缺 `,"value":"abc`(字符串未闭合)→ 去掉该残缺片段
+    m = re.search(r',\s*"[^"]*"\s*:\s*"[^"]*$', prefix)
+    if m:
+        out.append(prefix[: m.start()] + "}" * depth)
+    # 末尾残缺 `,"index":0`(值不完整)→ 去掉
+    m2 = re.search(r',\s*"[^"]*"\s*:\s*[^,}\s]+$', prefix)
+    if m2:
+        out.append(prefix[: m2.start()] + "}" * depth)
+    # 末尾残缺 `,"key":`(等值)
+    m3 = re.search(r',\s*"[^"]*"\s*:\s*$', prefix)
+    if m3:
+        out.append(prefix[: m3.start()] + "}" * depth)
+    return out

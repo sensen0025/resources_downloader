@@ -18,9 +18,14 @@ from .models import ExtractedResource, PageAnalysis, PageClass, PageInfo
 
 __all__ = ["classify_page", "verify_with_llm"]
 
+# 登录墙判定:只认「登录表单级」信号,不认导航里的 login/注册 链接或 CSS 类名
+# (普通站点的登录按钮/“loginbox”类名到处都是 → 会把整站误判成需登录 → 无邮箱时被跳过)。
 _LOGIN_MARKERS = re.compile(
-    r"sign in|log in|login|登录|sign up|注册|forgot password|password|密码|"
-    r"<input[^>]+type=[\"']password[\"']|verification code|验证码",
+    r"<form[^>]*(?:login|signin|sign-in|登录|register|注册)[^>]*>|"
+    r"<input[^>]+type=[\"']password[\"']|"
+    r"name=[\"'](?:username|user|account|password)[\"']|"
+    r"placeholder=[\"']?(?:用户名|账号|邮箱|密码|请输入密码)[\"']?|"
+    r"verification code|验证码",
     re.I,
 )
 _AGGREGATOR_MARKERS = re.compile(

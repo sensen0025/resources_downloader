@@ -55,6 +55,48 @@ class TestBing(unittest.TestCase):
         self.assertTrue(_valid_url("https://haowallpaper.com/homeViewLook"))
 
 
+class TestBingCnDirectUrls(unittest.TestCase):
+    """cn.bing.com 直接给真实 URL(非 /ck/a 跳转)+ cite 面包屑 → 结果不能被丢弃。"""
+
+    def _parse(self, html):
+        from search.engines.bing import BingEngine
+
+        eng = BingEngine()
+
+        class _R:
+            text = html
+            status_code = 200
+
+        eng._get = lambda *a, **k: _R()
+        return eng.search("测试", per_engine=5)
+
+    def test_cn_bing_direct_url_not_dropped(self):
+        # 报告案例:cn.bing 的 h2 href 直接是真实 URL(无 u= 参数),
+        # 旧逻辑全部走 cite 兜底→面包屑被拒→恒 0 结果
+        html = """
+        <ol id="b_results">
+        <li class="b_algo"><h2><a href="https://www.leshugu.info/book/207942" h="ID=SERP,1.1">师兄实在太稳健了 txt下载 - 乐书谷</a></h2>
+        <div class="b_caption"><p class="b_lineclamp2">全文txt下载</p></div>
+        <cite>https://www.leshugu.info › book › 207942</cite></li>
+        <li class="b_algo"><h2><a href="https://www.bing.com/ck/a?!&amp;p=abc&amp;u=a1aHR0cHM6Ly93d3cucHl0aG9uLm9yZy8&amp;ntb=1">python</a></h2>
+        <div class="b_caption"><p class="b_lineclamp2">desc</p></div>
+        <cite>https://www.python.org/</cite></li>
+        </ol>
+        """
+        urls = [r.url for r in self._parse(html)]
+        self.assertIn("https://www.leshugu.info/book/207942", urls)  # 直接 URL 不再被丢弃
+        self.assertIn("https://www.python.org/", urls)               # ck/a 解码仍工作
+
+    def test_cite_breadcrumb_fallback_takes_first_segment(self):
+        # cite 是 "https://x.com › sub › page" 面包屑时取第一段,而不是整条丢弃
+        html = """
+        <li class="b_algo"><h2><a href="/relative/x" h="ID=SERP,1.1">标题</a></h2>
+        <cite>https://example.com › sub › page</cite></li>
+        """
+        urls = [r.url for r in self._parse(html)]
+        self.assertEqual(urls, ["https://example.com"])
+
+
 class TestMojeek(unittest.TestCase):
     def test_parses_results(self):
         eng = _make_engine(MojeekEngine, "mojeek.html")

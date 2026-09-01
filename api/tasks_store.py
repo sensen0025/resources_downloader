@@ -77,7 +77,21 @@ class TaskStore:
         with self._lock:
             self._conn.executescript(_SCHEMA)
             self._migrate()
+            self._sweep_orphans()
             self._conn.commit()
+
+    def _sweep_orphans(self) -> None:
+        """孤儿任务清理:新进程启动时,任何 queued/running 的任务都属于上一个进程
+        (本进程还没创建过任务)—— 进程崩溃/重启后它们永远不会再被跑,
+        状态卡在 running 会让控制台一直显示"在跑"(线上"卡住"观感,曾滞留一整天)。
+        统一标记为 failed,附重启中断说明。
+        """
+        now = time.time()
+        self._conn.execute(
+            "UPDATE tasks SET status='failed', finished_at=?, updated_at=?, error=? "
+            "WHERE status IN ('queued','running')",
+            (now, now, "API 重启,运行中任务被中断"),
+        )
 
     def _migrate(self) -> None:
         existing = {r[1] for r in self._conn.execute("PRAGMA table_info(tasks)")}

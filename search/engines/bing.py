@@ -64,9 +64,16 @@ class BingEngine(SearchEngine):
                 continue
             href, title_html = m.group(1), m.group(2)
             url = _decode_bing_url(href)
+            if not url and href.startswith(("http://", "https://")):
+                # cn.bing.com 的结果直接给真实 URL(不是 bing.com/ck/a 跳转),
+                # 之前这里只认 u= 参数 → 中国区 Bing 的所有结果被丢弃 → 引擎恒为 0 条
+                url = href
             if not _valid_url(url):
                 cite = CITE_RE.search(block)
-                url = strip_tags(cite.group(1)) if cite else ""
+                if cite:
+                    cu = strip_tags(cite.group(1))
+                    # cite 常是 "https://x.com › sub › page" 面包屑 → 取第一段
+                    url = cu.split(" \u203a ")[0].strip() if " \u203a " in cu else cu
             if not _valid_url(url):
                 continue  # 解码失败且 cite 是面包屑 → 丢弃该条,不产出垃圾 URL
             sn = CAPTION_RE.search(block)

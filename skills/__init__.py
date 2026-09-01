@@ -26,3 +26,11 @@ __all__ = [
     "validate_args",
     "TOOL_KINDS",
 ]
+
+# 恢复上次的技能禁用状态(mod 式卸载在重启后依然生效)
+try:
+    from .manager import apply_state
+
+    apply_state()
+except Exception:  # 状态文件损坏/环境不完整时不阻断
+    pass

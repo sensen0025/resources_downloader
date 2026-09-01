@@ -28,10 +28,59 @@ from .models import ExtractedResource
 
 __all__ = ["extract_metadata", "extract_resources", "analyze_html"]
 
-# 下载按钮文本特征(中英)
+# 下载按钮文本特征(中英)。注意:不带裸「获取」(“获取积分/获取密码”到处都是)
 _DOWNLOAD_TEXT = re.compile(
-    r"download|获取|下载|立即|保存|save|\.zip$|\.rar$|直接|click here", re.I
+    r"download|下载|立即|保存|save|\.zip$|\.rar$|直接|click here", re.I
 )
+# 站点客户端/APP 安装按钮(「下载酷狗/下载客户端/获取客户端/立即安装」):
+# 引导安装软件,不是资源下载按钮 —— 酷狗歌曲页的「下载」按钮实际是
+# download.kugou.com/download/kugou_mac 的 93MB 客户端安装包(线上事故)。
+_CLIENT_INSTALL_TEXT = re.compile(
+    r"下载(?:酷狗|客户端|app|应用|软件客户端)|获取客户端|立即安装|安装(?:酷狗|客户端)", re.I
+)
+# 客户端安装包 URL:按钮文本可能只是通用「下载」,但 URL 指向站点自己的客户端
+# (download.kugou.com/download/kugou_mac / xxx/kugou_win.exe 等)—— 按 URL 兜底识别。
+_CLIENT_INSTALL_URL = re.compile(
+    r"^(?:https?://)?download\.(?:kugou|qqmusic|kuwo|kgmusic|music\.163|163)\.com/"
+    r"|[/_\-]?(?:kugou|qqmusic|kuwo|kgmusic|cloudmusic|music163|kg)[_\-]?(?:mac|win|pc|client|installer|setup)\.?(?:exe|dmg|apk|msi)?$",
+    re.I,
+)
+
+
+def _is_client_install_url(url: str) -> bool:
+    """URL 是否指向站点客户端安装包(与按钮文本无关,按 URL 形状识别)。"""
+    low = (url or "").lower().split("?")[0].split("#")[0]
+    return bool(_CLIENT_INSTALL_URL.search(low))
+# 阅读平台 SEO 引导页路径:书页/章节页/推荐页之间的互链(bookquery/kol-rec/chapter
+# /bookrecommend),锚文本常写「txt下载」但点进去是另一张书页而不是文件。
+_SEO_CONTENT_PATH = re.compile(
+    r"/(?:bookquery|kol-rec|chapter|bookrecommend|bookread|read)/", re.I
+)
+
+
+def _is_download_url(url: str) -> bool:
+    """下载按钮的 URL 判定:路径/查询里含 down/download/get/file/txt 等下载语义。
+
+    笔趣阁等 SEO 站的「XXX下载」锚文本常指向站内其它书页(/xs/<id>),不是下载按钮
+    —— 只有指向下载路径(或文件)的才算,避免 9 个假按钮全被当直链下载。
+    """
+    try:
+        from urllib.parse import urlsplit
+
+        p = urlsplit(url)
+        path = p.path.lower()
+        segs = [s for s in path.split("/") if s]
+        if any(s in segs for s in ("down", "download", "get", "file", "files",
+                                   "booktxt", "fulltext", "txt", "dl", "soft")):
+            return True
+        if any(s.startswith(("download", "down", "get", "txt")) for s in segs):
+            return True
+        q = p.query.lower()
+        if any(k.startswith(("download", "down", "action=down", "do=down")) for k in q.split("&")):
+            return True
+        return False
+    except Exception:
+        return False
 # 排除明显无关的锚文本(导航/社交)
 _SKIP_TEXT = re.compile(r"^(home|sign in|log in|register|登录|注册|menu|about|contact|搜索|首页)$", re.I)
 
@@ -119,8 +168,19 @@ def _score_link(url: str, text: str) -> tuple[str, float]:
         return "direct_file", 3.0
     if is_pan_share(url):
         return "pan_share", 2.5
+    if _SEO_CONTENT_PATH.search(url):
+        # 书页/章节页互链:不是下载按钮(锚文本「txt下载」是 SEO 文案)
+        return "link", 0.5
+    if _CLIENT_INSTALL_TEXT.search(text) or _is_client_install_url(url):
+        # 「下载酷狗/下载客户端/立即安装」或 URL 指向站点客户端安装包:
+        # 是装客户端,不是资源下载按钮。标记为 client_install(不进直链下载),
+        # 但保留在资源里 —— 页面由任务层路由给 Agent 找真实资源(规则判断不了,AI 能)。
+        return "client_install", 1.0
     if _DOWNLOAD_TEXT.search(text):
-        return "download_button", 2.0
+        if _is_download_url(url):
+            return "download_button", 2.0
+        # 「XXX下载」指向普通页面(笔趣阁站内互推书页等)→ 不是下载按钮
+        return "link", 0.5
     return "link", 0.5
 
 
@@ -166,10 +226,11 @@ def _img_url(tag: str, base_url: str) -> tuple[str, float]:
     return "", 0.0
 
 
-# 过滤页脚、备案、头像、营业执照、图标等通用噪音图片
+# 过滤页脚、备案、头像、营业执照、资质证书、图标等通用噪音图片
 _NOISE_IMG_RE = re.compile(
     r"license|beian|footer|avatar|header|logo|icon|badge|qrcode|weixin|alipay|"
-    r"营业执照|资质|备案|认证|宣传|ad_|banner|spm|report",
+    r"营业执照|资质|备案|认证|宣传|ad_|banner|spm|report|"
+    r"许可证|icp|增值电信|网络文化|出版物经营|icp证",
     re.I,
 )
 
@@ -225,6 +286,10 @@ def extract_resources(html: str, base_url: str, max_items: int = 40) -> list[Ext
         kind, score = _score_link(url, text)
         if kind == "ad":
             continue  # 广告链接(adblock 数据池)→ 不进候选
+        if kind == "direct_file" and _is_noise_image(url, text):
+            # 营业执照/备案/logo/头像等噪音图片被 <a> 包裹时(<a href="…jpg">营业执照</a>)
+            # 也按图片噪音过滤,不当文件直链(与 <img> 通道一致)
+            continue
         _add(url, kind, score, text=text, name=name)
 
     for tag in _IMG_RE.findall(html):
@@ -259,6 +324,14 @@ def extract_resources(html: str, base_url: str, max_items: int = 40) -> list[Ext
         url = _resolve(base_url, m_3d)
         if url and is_direct_file_url(url):
             _add(url, "direct_file", 3.0, text="3D Embedded Asset", name=page_title)
+
+    # littleskin(Blessing Skin)皮肤详情页:skinlib/show/{tid} → 皮肤直链 raw/{tid}。
+    # 页面是 JS 渲染 SPA,DOM 不暴露该链接,需按 Blessing Skin 约定合成;
+    # /raw/{tid} Guest 可直接下载(PNG),免登录 —— 线上事故:皮肤查询找不到 littleskin 皮肤。
+    m_ls = re.search(r"littleskin\.cn/skinlib/show/(\d+)", base_url, re.I)
+    if m_ls:
+        _add(f"https://littleskin.cn/raw/{m_ls.group(1)}", "direct_file", 3.5,
+             text="littleskin 皮肤直链", name=page_title or "littleskin 皮肤")
 
     return sorted(found.values(), key=lambda r: r.score, reverse=True)[:max_items]
 

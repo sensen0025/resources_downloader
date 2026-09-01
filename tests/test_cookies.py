@@ -14,6 +14,7 @@ from agent.cookies import (
     _sanitize,
     cookie_path,
     delete_cookies,
+    find_cookies,
     has_cookies,
     load_cookies,
     save_cookies,
@@ -132,6 +133,38 @@ class TestSaveDelete(unittest.TestCase):
         self.assertTrue(delete_cookies(p))
         self.assertFalse(p.exists())
         self.assertFalse(delete_cookies(p))  # 已删 → False
+
+
+class TestFindCookies(unittest.TestCase):
+    """子域回退查找:导入的本地 cookie 按注册域存档,www/m 子域都能命中。"""
+
+    def setUp(self):
+        import agent.cookies as ckmod
+
+        self.td = tempfile.TemporaryDirectory(prefix="rh_ckf_")
+        self._orig = ckmod._COOKIES_DIR
+        ckmod._COOKIES_DIR = Path(self.td.name)
+        now = time.time()
+        (Path(self.td.name) / "manga.com.json").write_text(
+            json.dumps(_state(_cookie("sid", now + 3600, "manga.com"))), encoding="utf-8")
+
+    def tearDown(self):
+        import agent.cookies as ckmod
+
+        ckmod._COOKIES_DIR = self._orig
+        self.td.cleanup()
+
+    def test_exact_host(self):
+        p = find_cookies("manga.com")
+        self.assertIsNotNone(p)
+        self.assertEqual(p.name, "manga.com.json")
+
+    def test_subdomain_fallback(self):
+        self.assertEqual(find_cookies("www.manga.com").name, "manga.com.json")
+        self.assertEqual(find_cookies("m.manga.com").name, "manga.com.json")
+
+    def test_unknown_host(self):
+        self.assertIsNone(find_cookies("not-recorded.com"))
 
 
 if __name__ == "__main__":

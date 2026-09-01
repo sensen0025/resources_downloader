@@ -132,6 +132,10 @@ class AgentCore:
         except Exception as e:
             return None
         try:
+            # 复用 agent.agent 的容错解析(截断补全/尾文本/围栏/单引号),
+            # 避免同一份坏输出在 AI 主路径上也白白重试
+            from agent.agent import _parse_decision
+
             return _parse_decision(text)
         except Exception:
             return None

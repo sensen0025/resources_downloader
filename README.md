@@ -164,11 +164,12 @@ python run_account.py login claude --email xxx@gmail.com --forget-cookies   # �
 | 🤖 AI 核心 | `ai/` | **AI Harness(DSH 同构)**:AgentCore 单一循环 + 全技能注册表;AI 自主规划(意图绑定)→ 检索(语义重排)→ 分析 → 下载(换源/换格式)→ 验证;决策全审计 |
 | 🛠️ 技能内核 | `skills/core.py` | DSH 式 `@tool` 注册表:单点定义工具契约、执行前参数强校验、catalog 直喂 LLM |
 | 📮 邮箱收码 | `skills/mail/` | IMAP 轮询真实邮箱收验证码,纯标准库,已实测 Gmail |
-| 🖼️ 图形验证码 | `skills/captcha/` | ddddocr 本地 OCR + 检测裁剪 + 多变体投票 + 三态置信度 + 可选 VLM 兜底,文档见 `skills/captcha/README.md`(注意它需要 `venv-demo` 的 Python,内含 ddddocr/opencv) |
+| 🖼️ 图形验证码 | `skills/captcha/` | ddddocr 本地 OCR + 检测裁剪 + 多变体投票 + 三态置信度 + 可选 VLM 兜底 + **滑块拼图验证码**(`slide_captcha` 工具,ddddocr/cv2 缺口检测 + Playwright 拖拽),文档见 `skills/captcha/README.md`(注意它需要 `venv-demo` 的 Python,内含 ddddocr/opencv) |
 | 🛡️ 下载查毒 | `skills/security/` | **下载文件安全性校对**:开源杀毒 ClamAV(clamd/clamscan)+ YARA 规则 + 内置启发式(魔法字节伪装/压缩炸弹/脚本载荷/双重扩展名);`scan_file` 工具 + 下载链路安全闸门,文档见 `skills/security/README.md` |
 | ⚡ 流式下载 | `skills/streaming/` | **音视频大文件专用**:直链分段并发(分片级断点续传)+ HLS/m3u8(分段并发/AES-128 加密)+ 边下边交付 + 限速 + 实时进度;`download_stream` 工具,media 类型自动分流,文档见 `skills/streaming/README.md` |
 | 🌀 万能下载 | `skills/universal/` | **一个入口搞定在线播放**:播放页/聚合页自动找 m3u8 流并合并落地;Cloudflare "Just a moment" 浏览器会话反制(cf_clearance 复用);fmp4 自动 ffmpeg 兜底;`universal_download` 工具,`download` 对 m3u8/CF 自动路由,文档见 `skills/universal/README.md` |
-| 🚫 广告过滤 | `skills/adblock/` | **类 EasyList 广告数据池**:广告域名/URL 模式/文本标记,检索候选剔除 + 页面链接不进候选 + 相关性扣分 |
+| 🚫 广告过滤 | `skills/adblock/` | **类 EasyList 广告数据池**:内置规则 + 开源列表(EasyList/EasyPrivacy/AdGuard 中文,服务器 `python -m skills.adblock.update_rules` 拉取,**5万+ 广告域名**两级索引微秒级判定);检索候选剔除 + 页面链接不进候选 + 相关性扣分 |
+| ☁️ 夸克网盘 | `skills/quark/` | **夸克网盘自动解析**:分享链接 → 递归清单 → 按意图选文件 → 转存 → 换直链 → 下载落地(纯 requests 零依赖,**一次导入 Cookie 后全自动,不再扫码**);`quark_resolve`/`quark_download` 工具 + fetch_resource 自动接管 pan.quark.cn 分享,文档见 `skills/quark/README.md` |
 | 🤖 资源任务 | `agent/tasks/` | `fetch_resource()`:检索→分析→直链快路径→浏览器 Agent 慢路径(登录/CF/下载) |
 | ⬇️ 下载交付 | `delivery/` | `.part` 断点续传 + Range 校验 + hash/大小校验 |
 | 🌐 HTTP API | `api/` | 客户资源下载接口:令牌申请(每人独立,可查历史)+ 任务契约(状态机/事件流)+ 传输(轮询/SSE 实时/Webhook 签名回调)+ 文件交付(**Range 断点续传**/zip),文档见下方「客户 API」 |
@@ -203,13 +204,25 @@ python -m skills.universal.cli download "https://.../play.html" --out downloads
 python -m skills.universal.cli resolve "https://.../play.html"    # 先看页面里有哪些流
 python -m skills.universal.cli ffmpeg                             # fmp4 合并需要 ffmpeg
 
+# 广告数据池:更新开源规则(EasyList / EasyPrivacy / AdGuard 中文 → data/rules.json)
+python -m skills.adblock.update_rules
+
+# 技能管理器:像 mod 一样安装/卸载/启停技能(文档见 docs/SKILLS.md)
+python -m skills.manager list
+python -m skills.manager install ./my_skill
+python -m skills.manager uninstall security
+python -m skills.manager disable streaming
+
+# 下载无需指定格式:AI/关键词自动判断(动漫→视频流含 m3u8, FLAC→音频, 壁纸→图片…)
+python -c "from agent.tasks.fetch_resource import _infer_file_types; print(_infer_file_types('凡人修仙传 第10集', None))"
+
 # 客户 API:启动服务
 uvicorn api.app:app --port 8000
 
 # 打开浏览器访问网页控制台(下载任务/配置/历史/令牌/查毒 都在这里)
 #   http://127.0.0.1:8000/
-#   首次使用:配置页填 LLM API Key + 邮箱授权码 → 保存(立即生效)→ 下载页提交任务
-#   令牌模式(RH_API_SECRET)下:令牌页申请 token → 右上角「令牌登录」
+#   ⚡ 网页访问免令牌,打开即用;配置页填 LLM API Key + 邮箱授权码 → 保存(立即生效)
+#   令牌只约束程序化 API(curl/脚本):令牌页申请一次长期有效 → Bearer 认证
 
 # ① 申请令牌(每人独立;服务端配 RH_API_SECRET 后必须 Bearer 认证)
 curl -X POST http://127.0.0.1:8000/api/v1/tokens -H "Content-Type: application/json" -d '{"name":"my-app"}'

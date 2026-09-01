@@ -25,6 +25,30 @@ __all__ = ["search", "search_engines"]
 ENGINE_ORDER_LABEL = {"bing": "Bing", "baidu": "百度", "mojeek": "Mojeek",
                       "so360": "360", "duckduckgo": "DDG", "github": "GitHub"}
 
+# 单引擎在最终列表的最大贡献:防止某个引擎(如 360 全量 so.com/link 中转链)
+# 挤掉其它引擎的真实资源页。bias 参数透传给各引擎构造函数。
+# 注:该值不能太小 —— 只有 1~2 家引擎可用(其余超时/403)时,4 条/引擎会把
+# 总候选卡死在 8 条,真实源(电子书站/网盘页)排不进分析预算。8 条/引擎 + 中转链
+# 扣分已足够防止单一引擎挤占。
+_MAX_PER_ENGINE = 8
+
+
+def _cap_per_engine(ranked: list, limit: int, max_per_engine: int = _MAX_PER_ENGINE) -> list:
+    """按引擎配额截断:每个引擎最多贡献 max_per_engine 条,直到凑满 limit。"""
+    if not limit:
+        return ranked
+    counts: dict[str, int] = {}
+    out: list = []
+    for r in ranked:
+        eng = getattr(r, "engine", "") or ""
+        if counts.get(eng, 0) >= max_per_engine:
+            continue
+        counts[eng] = counts.get(eng, 0) + 1
+        out.append(r)
+        if len(out) >= limit:
+            break
+    return out
+
 
 def search_engines(query: str, engines: Optional[list[str]] = None,
                    per_engine: int = 10, timeout: float = 12.0) -> list[EngineOutcome]:
@@ -116,4 +140,5 @@ def search(query: str, engines: Optional[list[str]] = None,
         apply_probe_weights(top, probes)
         ranked.sort(key=lambda x: x.score, reverse=True)
 
+    ranked = _cap_per_engine(ranked, limit)  # 单引擎配额,防一家挤占全部名额
     return ranked[:limit] if limit else ranked

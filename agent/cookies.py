@@ -31,6 +31,7 @@ from typing import Optional
 __all__ = [
     "cookies_dir",
     "cookie_path",
+    "find_cookies",
     "has_cookies",
     "load_cookies",
     "save_cookies",
@@ -57,6 +58,25 @@ def cookie_path(site_or_domain: str, email: str = "") -> Path:
     if email:
         key = f"{key}__{_sanitize(email)}"
     return _COOKIES_DIR / f"{key}.json"
+
+
+def find_cookies(host: str, email: str = "") -> Optional[Path]:
+    """按域名查找登录态文件,支持子域回退。
+
+    导入的本地 cookie 按注册域存档(如 manga.com.json),Agent 访问
+    www.manga.com / m.manga.com 时逐级缩短子域查找,都能命中同一份登录态。
+    返回第一个存在且含有效 cookie 的文件路径;找不到返回 None。
+    """
+    host = (host or "").strip().lower().lstrip(".")
+    parts = host.split(".")
+    for i in range(len(parts)):
+        cand = ".".join(parts[i:])
+        if not cand:
+            continue
+        p = cookie_path(cand, email)
+        if p.exists() and has_cookies(p):
+            return p
+    return None
 
 
 def _expired(cookie: dict, now: float) -> bool:

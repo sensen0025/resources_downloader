@@ -1,0 +1,7 @@
+{
+  "name": "sandbox",
+  "version": "0.1.0",
+  "description": "AI 本地程序沙盒:任务目录内 read/write/run,AI 自写脚本解决站点特定问题(路径沙箱+超时+无密钥环境)",
+  "tools": ["sandbox_read", "sandbox_write", "sandbox_python", "sandbox_run"],
+  "requires": []
+}

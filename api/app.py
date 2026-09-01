@@ -27,9 +27,20 @@ from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
-from .auth import LOCAL_OWNER, current_owner, get_token_store, is_token_mode
+from .auth import (
+    LOCAL_OWNER,
+    client_ip,
+    current_owner,
+    get_token_store,
+    is_token_mode,
+    is_web_request,
+    require_admin,
+    resolve_owner,
+    web_owner,
+)
+from .ratelimit import allow as rate_allow
 from .settings import env_status, get_masked, update_env
 from .tasks_store import TERMINAL_STATUS, TaskStore
 from .token_store import TokenStore, new_owner
@@ -58,7 +69,7 @@ app.mount("/static", StaticFiles(directory=str(WEB_DIR)), name="static")
 def index() -> FileResponse:
     return FileResponse(WEB_DIR / "dashboard.html")
 
-_STAGE_PERCENT = {"search": 10, "analyze": 30, "download": 60, "scan": 80, "agent": 70}
+_STAGE_PERCENT = {"search": 10, "analyze": 30, "download": 60, "novel": 65, "scan": 80, "agent": 70}
 
 # ---------------------------------------------------------------- 统一信封与错误
 
@@ -104,22 +115,38 @@ class IntentModel(BaseModel):
 
 
 class TaskRequest(BaseModel):
-    query: str = ""
-    seed_urls: List[str] = []
-    file_types: List[str] = []          # 空 = 按查询自动推断类型
-    label: str = ""
-    callback_url: str = ""              # Webhook:完成/失败时回调
-    idempotency_key: str = ""           # 幂等键(也可放 Idempotency-Key 头)
-    login_email: str = ""               # 需登录站点:注册邮箱(Agent 自动登录/收码)
-    username: str = ""
+    query: str = Field(default="", max_length=500)       # 防超长 Query 撑爆 Agent/LLM Prompt(ReDoS/上下文溢出)
+    seed_urls: List[str] = Field(default_factory=list, max_length=20)
+    file_types: List[str] = Field(default_factory=list, max_length=20)
+    label: str = Field(default="", max_length=100)
+    callback_url: str = Field(default="", max_length=500)   # Webhook:完成/失败时回调
+    idempotency_key: str = Field(default="", max_length=100)  # 幂等键(也可放 Idempotency-Key 头)
+    login_email: str = Field(default="", max_length=200)   # 需登录站点:注册邮箱(Agent 自动登录/收码)
+    username: str = Field(default="", max_length=100)
     use_agent_fallback: bool = True
     security_scan: bool = True          # 下载后查毒闸门(ClamAV+YARA+启发式)
     reuse_cookies: bool = True          # 复用登录态 Cookie
     intent: Optional[IntentModel] = None
 
+    @field_validator("seed_urls")
+    @classmethod
+    def _seed_urls_len(cls, v: List[str]) -> List[str]:
+        for u in v or []:
+            if len(u) > 2048:
+                raise ValueError("seed_urls 单条 URL 过长(>2048)")
+        return v
+
+    @field_validator("file_types")
+    @classmethod
+    def _file_types_ok(cls, v: List[str]) -> List[str]:
+        for e in v or []:
+            if len(e) > 12 or not e.startswith("."):
+                raise ValueError(f"file_types 项需为 . 开头的短扩展名: {e!r}")
+        return v
+
 
 class TokenApply(BaseModel):
-    name: str = ""
+    name: str = Field(default="", max_length=100)
     expires_days: int = Field(default=0, ge=0, le=3650)  # 0 = 不过期
 
 
@@ -134,7 +161,7 @@ def _resolve_apply_owner(request: Request) -> tuple[str, bool]:
             return tok["owner"], True
     if is_token_mode():
         return new_owner(), False
-    return LOCAL_OWNER, False
+    return web_owner(request), False  # 个人模式:按 IP 租户(不再共享 local)
 
 
 @app.post("/api/v1/tokens", status_code=201)
@@ -274,6 +301,7 @@ def get_task(task_id: str, owner: str = Depends(current_owner)) -> dict:
     task = _get_owned(task_id, owner)
     payload = _task_payload(task)
     payload["files"] = [_file_public(f, task_id) for f in (task.get("files") or [])]
+    payload["pan_links"] = (task.get("result") or {}).get("pan_links") or []
     return _ok(payload)
 
 
@@ -300,6 +328,11 @@ def task_events(task_id: str, owner: str = Depends(current_owner)) -> StreamingR
             if task is None:
                 break
             for e in (task.get("events") or [])[last:]:
+                # 终态事件不重放:末尾由统一的 event: done/failed 帧承载(含 status),
+                # 否则客户端会先收到一条无 status 字段的存库终态帧
+                # (网页 log 出现 "undefined: 任务结束: undefined")
+                if e["type"] in TERMINAL_STATUS:
+                    continue
                 yield f"event: {e['type']}\ndata: {json.dumps(e, ensure_ascii=False)}\n\n"
             last = len(task.get("events") or [])
             if task["status"] in TERMINAL_STATUS:
@@ -318,7 +351,11 @@ def task_events(task_id: str, owner: str = Depends(current_owner)) -> StreamingR
 # ---------------------------------------------------------------- 文件交付(断点续传)
 
 def _resolve_file_owner(request: Request, task_id: str) -> str:
-    """文件访问授权:有效 file_token 或 同 owner 的 Bearer;个人模式放行。"""
+    """文件访问授权:file_token(分享链接)/ 同 owner 的 Bearer / 同 owner 的网页或匿名请求。
+
+    移除旧的"个人模式一律放行"逻辑 —— 公网个人模式下任意访客都能拿到
+    任意任务文件(原缺陷)。现在必须与任务 owner(按 IP 租户或令牌)一致。
+    """
     task = _store.get(task_id)
     if task is None:
         raise HTTPException(status_code=404, detail="任务不存在")
@@ -329,9 +366,13 @@ def _resolve_file_owner(request: Request, task_id: str) -> str:
         tok = _tokens.get_by_key(auth[7:].strip())
         if tok is not None and tok["status"] == "active" and tok["owner"] == task["owner"]:
             return task["owner"]
-    if not is_token_mode():
-        return task["owner"]  # 个人模式:本地自用放行
-    raise HTTPException(status_code=403, detail="无权访问该任务文件(需文件 token 或本人 Bearer)")
+    try:
+        owner = resolve_owner(request, _tokens)
+    except HTTPException:
+        owner = None
+    if owner == task["owner"]:
+        return owner
+    raise HTTPException(status_code=403, detail="无权访问该任务文件(需文件 token 或本人身份)")
 
 
 def _safe_resolve(task_dir: Path, name: str) -> Optional[Path]:
@@ -348,6 +389,18 @@ def _safe_resolve(task_dir: Path, name: str) -> Optional[Path]:
     return p
 
 
+def _content_disposition(filename: str) -> str:
+    """RFC 5987 附件头:中文文件名用 filename*=UTF-8''<percent-encoded>。
+
+    直接拼原始中文会触发 uvicorn latin-1 头部编码异常(HTTP 500)——
+    中文文件名的任务下载按钮一点就 500(线上事故复现)。
+    """
+    from urllib.parse import quote
+
+    ascii_name = filename.encode("ascii", "replace").decode("ascii").replace('"', "_")
+    return f'attachment; filename="{ascii_name}"; filename*=UTF-8\'\'{quote(filename)}'
+
+
 def _serve_range(request: Request, path: Path, filename: str = "",
                  content_type: str = "application/octet-stream") -> Response:
     """Range 断点续传下载(206 + Content-Range + Accept-Ranges)。"""
@@ -355,7 +408,7 @@ def _serve_range(request: Request, path: Path, filename: str = "",
     filename = filename or path.name
     headers = {
         "Accept-Ranges": "bytes",
-        "Content-Disposition": f'attachment; filename="{filename}"',
+        "Content-Disposition": _content_disposition(filename),
         "Content-Type": content_type,
     }
     start, end = 0, size - 1
@@ -447,8 +500,10 @@ def status() -> dict:
 
 
 @app.get("/api/v1/settings")
-def get_settings(owner: str = Depends(current_owner)) -> dict:
-    """配置视图(脱敏:敏感值只回掩码)。"""
+def get_settings(request: Request) -> dict:
+    """配置视图(管理员):脱敏,但只有 RH_ADMIN_TOKEN/回环可见 ——
+    公网匿名读配置(原缺陷:泄露运行状态)。"""
+    require_admin(request)
     return _ok({"fields": get_masked()})
 
 
@@ -465,8 +520,13 @@ class SettingsUpdate(BaseModel):
 
 
 @app.put("/api/v1/settings")
-def put_settings(body: SettingsUpdate, owner: str = Depends(current_owner)) -> dict:
-    """保存配置:立即生效(os.environ)+ 持久化(.env)。"" = 清除,None = 不改。"""
+def put_settings(body: SettingsUpdate, request: Request) -> dict:
+    """保存配置(管理员):立即生效(os.environ)+ 持久化(.env)。
+
+    公网匿名可覆写 = 致命:攻击者可写入 api_secret 锁死控制台 / 改 proxy_url
+    劫持流量 / 清空 llm_api_key 瘫痪服务(原缺陷 1)。必须管理员。
+    "" = 清除,None = 不改。"""
+    require_admin(request)
     changes = update_env(body.model_dump())
     return _ok({"changes": changes, "status": env_status()})
 
@@ -475,14 +535,38 @@ class ScanRequest(BaseModel):
     path: str
 
 
-@app.post("/api/v1/scan")
-def scan_file_endpoint(body: ScanRequest, owner: str = Depends(current_owner)) -> dict:
-    """查毒技能可视化:扫描服务器上的文件/目录(个人模式免认证)。"""
-    from skills.security import scan_file
+def _scan_path_allowed(p: Path) -> bool:
+    """扫描路径沙箱:仅允许 downloads/ 与 data/tasks/ 内的路径。
 
+    原缺陷 2:任意 path(如 /etc/passwd、.env)都能被公网探测并回显扫描结果。
+    DATA_DIR 在运行时取值(测试会重定向到沙箱,模块级常量会拿到旧值)。
+    """
+    try:
+        rp = p.resolve()
+    except Exception:
+        return False
+    for root in (PROJECT_ROOT / "downloads", DATA_DIR):
+        try:
+            rr = root.resolve()
+            if rp == rr or rp.is_relative_to(rr):
+                return True
+        except (OSError, AttributeError):
+            continue
+    return False
+
+
+@app.post("/api/v1/scan")
+def scan_file_endpoint(body: ScanRequest, request: Request) -> dict:
+    """查毒技能可视化(管理员 + 路径沙箱):扫描 downloads/ 与 data/tasks/ 内文件。"""
+    require_admin(request)
     p = Path(body.path)
+    if not _scan_path_allowed(p):
+        return _error(403, "FORBIDDEN",
+                      "仅允许扫描 downloads/ 与 data/tasks/ 目录内的路径(防任意文件探测)")
     if not p.exists():
         return _error(404, "NOT_FOUND", f"路径不存在: {body.path}")
+    from skills.security import scan_file
+
     r = scan_file(p)
     return _ok(r.to_dict())
 
@@ -494,8 +578,12 @@ class LlmTestResult(BaseModel):
 
 
 @app.post("/api/v1/test-llm")
-def test_llm(owner: str = Depends(current_owner)) -> dict:
-    """配置页「测试 LLM」:用当前 key 发一次极简请求。"""
+def test_llm(request: Request) -> dict:
+    """配置页「测试 LLM」(管理员 + IP 频控):每次调用都会真实消耗 LLM 额度,
+    公网匿名可刷 = 资金损失(原缺陷 4)。"""
+    require_admin(request)
+    if not rate_allow(f"test_llm:{client_ip(request)}", limit=5, window=60):
+        return _error(429, "RATE_LIMITED", "操作过于频繁,请稍后再试(每分钟限 5 次)")
     import time
 
     from agent.llm import LLMClient

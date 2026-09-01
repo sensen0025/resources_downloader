@@ -60,6 +60,14 @@ class TestScoring(unittest.TestCase):
         page = _r("book", "https://x.com/book")
         self.assertGreater(relevance_score(q, direct), relevance_score(q, page))
 
+    def test_redirector_link_penalized(self):
+        # 搜索引擎中转链接(so.com/link 等)不是资源页,应扣分排在真实 URL 后面
+        q = "某书 txt 全集"
+        stub = _r("某书 txt 全集 下载", "https://so.com/link?m=abc123")
+        real = _r("某书 txt 全集 下载", "https://bqgw.com/book/1")
+        self.assertLess(relevance_score(q, stub), relevance_score(q, real))
+        self.assertEqual(relevance_score(q, stub), relevance_score(q, real) - 3.0)
+
 
 class TestFilter(unittest.TestCase):
     def test_zero_relevance_dropped(self):
@@ -69,6 +77,30 @@ class TestFilter(unittest.TestCase):
     def test_tracking_host_dropped(self):
         kept = filter_results("python", [_r("python", "https://adservice.google.com/x")])
         self.assertEqual(kept, [])
+
+
+class TestPerEngineCap(unittest.TestCase):
+    def test_cap_limits_single_engine_contribution(self):
+        from search.aggregator import _cap_per_engine
+        from search.models import SearchResult
+
+        rs = [
+            SearchResult(title=f"t{i}", url=f"https://{e}.com/{i}", engine=e, rank=i)
+            for i, e in enumerate(("a", "a", "a", "a", "a", "b", "b"), start=1)
+        ]
+        capped = _cap_per_engine(rs, limit=6, max_per_engine=2)
+        self.assertEqual([r.engine for r in capped], ["a", "a", "b", "b"])
+
+    def test_cap_respects_limit(self):
+        from search.aggregator import _cap_per_engine
+        from search.models import SearchResult
+
+        rs = [
+            SearchResult(title=f"t{i}", url=f"https://x.com/{i}", engine="a", rank=i)
+            for i in range(1, 6)
+        ]
+        capped = _cap_per_engine(rs, limit=3, max_per_engine=10)
+        self.assertEqual(len(capped), 3)
 
 
 class TestProbeClassify(unittest.TestCase):

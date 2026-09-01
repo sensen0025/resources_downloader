@@ -1,0 +1,7 @@
+{
+  "name": "siterep",
+  "version": "0.1.0",
+  "description": "站点信誉库:LLM 对访问过的网站打分(0-9 综合 获取容易度/虚假/可访问性)并生成短描述,录入库中;下次按向量相似度查 top-k(带评分),优选好站",
+  "tools": ["record_site_feedback", "site_lookup"],
+  "requires": []
+}

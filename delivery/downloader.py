@@ -58,7 +58,7 @@ def download(
     expected_ext: str = "",
     min_size: int = 0,
     expected_sha256: str = "",
-    timeout: float = 30.0,
+    timeout: float = 120.0,
     progress: Optional[Callable[[int, int], None]] = None,
     retries: int = 3,
     referer: str = "",
@@ -74,6 +74,7 @@ def download(
     if referer:
         headers["Referer"] = referer
     t0 = time.monotonic()
+    current_url = url  # TLS 握手失败时回退 http(部分站 https 配置损坏,只提供 http)
 
     for attempt in range(retries):
         resumed = part.exists() and part.stat().st_size > 0
@@ -81,7 +82,7 @@ def download(
         if start:
             headers["Range"] = f"bytes={start}-"
         try:
-            with requests.get(url, headers=headers, stream=True, timeout=timeout,
+            with requests.get(current_url, headers=headers, stream=True, timeout=timeout,
                               allow_redirects=True, proxies=proxies()) as r:
                 if r.status_code == 416:  # Range 越界 → 服务器已完整
                     part.unlink(missing_ok=True)
@@ -107,6 +108,14 @@ def download(
                         f.write(chunk)
                         if progress:
                             progress(start + f.tell(), total)
+                        # 墙钟超时:requests 的 timeout 只管单次 socket 读写,
+                        # 慢速但不断流的服务器(如 92wx.la ~1KB/s)会让任务挂死数十分钟。
+                        # 这里按总耗时硬性截断,保留 .part 断点(下次可续传)。
+                        if time.monotonic() - t0 > timeout:
+                            return DownloadResult(
+                                url=url,
+                                error=f"下载超时(>{timeout:g}s 墙钟),已保留 .part 断点",
+                                elapsed=time.monotonic() - t0)
                 # 流式写完后再嗅探头部(兼容服务器不报 Content-Type 的情况)
                 if expected_ext and not part.stat().st_size:
                     pass
@@ -117,8 +126,14 @@ def download(
                         return DownloadResult(
                             url=url, error="下载内容为 HTML(可能需登录或链接非直链),已拒绝")
                 if expected_ext and not dest.name.lower().endswith(expected_ext.lower()):
-                    # 扩展名不符 → 用 Content-Type 或 URL 修正文件名
-                    pass
+                    # 扩展名不符 → 用 Content-Type / 内容嗅探修正文件名
+                    # (乐书谷类站点下载链无扩展名:down.leshugu.info/down/207942 → text/plain)
+                    new_name = _fix_filename(dest.name, ct, part)
+                    if new_name:
+                        new_part = dest_dir / f"{new_name}.part"
+                        os.replace(part, new_part)
+                        part = new_part
+                        dest = dest_dir / new_name
                 if min_size and part.stat().st_size < min_size:
                     return DownloadResult(url=url, error=f"文件过小: {part.stat().st_size}B < {min_size}B")
                 if expected_sha256:
@@ -132,6 +147,12 @@ def download(
                 return DownloadResult(url=url, path=str(dest), size=dest.stat().st_size,
                                       resumed=resumed, elapsed=time.monotonic() - t0)
         except requests.RequestException as e:
+            # TLS 握手失败(SSLError)→ 若还是 https,立即回退 http 重试同一轮
+            # (部分站点如 80ge.info 的 https 配置损坏/被墙,只提供 http 服务)
+            if (isinstance(e, requests.exceptions.SSLError)
+                    and current_url.startswith("https://")):
+                current_url = "http://" + current_url[len("https://"):]
+                continue
             if attempt < retries - 1:
                 time.sleep(2 * (attempt + 1))
                 continue
@@ -150,3 +171,51 @@ def _guess_filename(url: str) -> str:
     if not name or "." not in name:
         name = f"download_{abs(hash(url)) % 1000000}.bin"
     return name[:200]
+
+
+# Content-Type → 扩展名(无扩展名下载链补名用)
+_CT_EXT = {
+    "text/plain": ".txt",
+    "text/html": ".html",
+    "application/zip": ".zip",
+    "application/x-zip-compressed": ".zip",
+    "application/x-rar-compressed": ".rar",
+    "application/vnd.rar": ".rar",
+    "application/pdf": ".pdf",
+    "application/epub+zip": ".epub",
+    "application/x-mobipocket-ebook": ".mobi",
+    "application/octet-stream": ".bin",
+}
+
+
+def _fix_filename(name: str, content_type: str, part: Path) -> str:
+    """给无真实扩展名的文件补扩展名:优先 Content-Type,缺失时嗅探内容。
+
+    _guess_filename 对无扩展名 URL 落成 download_XXX.bin(占位),
+    这里按实际类型修正为 .txt/.zip/... → 下载探针才能按期望扩展名计数。
+    返回新文件名;无需修正返回空串。
+    """
+    import mimetypes
+
+    suffix = Path(name).suffix.lower()
+    if suffix not in ("", ".bin"):  # 已有真实扩展名(或占位 .bin 之外的)不动
+        return ""
+    ct = (content_type or "").lower().split(";")[0].strip()
+    ext = _CT_EXT.get(ct, "")
+    if not ext:
+        if ct.startswith(("audio/", "video/", "image/")):
+            ext = mimetypes.guess_extension(ct) or ".bin"
+        elif ct.startswith("text/"):
+            ext = ".txt"
+    if not ext and part.exists() and part.stat().st_size > 0:
+        # 内容嗅探:前 4KB 可打印/多字节文本占比高 → txt
+        try:
+            head = part.read_bytes()[:4096]
+            printable = sum(1 for b in head if 9 <= b <= 13 or 32 <= b < 127 or b >= 0x80)
+            if head and printable / len(head) > 0.9:
+                ext = ".txt"
+        except OSError:
+            pass
+    if ext:
+        return Path(name).stem + ext if suffix == ".bin" else Path(name).name + ext
+    return ""

@@ -1,0 +1,7 @@
+{
+  "name": "universal",
+  "version": "0.1.0",
+  "description": "万能下载:播放页找流/CF 反制/m3u8",
+  "tools": ["universal_download"],
+  "requires": []
+}

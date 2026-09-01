@@ -10,6 +10,26 @@ class TestNormalize(unittest.TestCase):
         url = "https://example.com/a/b?utm_source=x&utm_medium=y&id=5&spm=123"
         self.assertEqual(normalize_url(url), "https://example.com/a/b?id=5")
 
+    def test_opaque_query_token_survives_roundtrip(self):
+        # 报告案例:so.com/link?m=<不透明 token> —— parse_qsl 会解码,重建必须重新编码,
+        # 否则 %2F→/、%2B→+、%3D→= 破坏 token,360 中转链接直接 400。
+        url = ("https://www.so.com/link?m=woxYC%2FQC5lb%2Babc%3D%3D&src=search&pwd=")
+        n = normalize_url(url)
+        self.assertIn("m=woxYC%2FQC5lb%2Babc%3D%3D", n)   # token 原样保留
+        self.assertNotIn("src", n)                          # 跟踪参数仍被丢弃
+        self.assertNotIn("pwd=", n)                         # 空网盘参数被丢弃
+
+    def test_cjk_query_value_reencoded(self):
+        # 中文查询值重建后仍是合法编码(服务端可解回原文)
+        self.assertEqual(
+            normalize_url("https://x.com/s?q=师兄 全集"),
+            "https://x.com/s?q=%E5%B8%88%E5%85%84+%E5%85%A8%E9%9B%86",
+        )
+        self.assertEqual(
+            normalize_url("https://x.com/s?q=%E5%B8%88%E5%85%84%20%E5%85%A8%E9%9B%86"),
+            "https://x.com/s?q=%E5%B8%88%E5%85%84+%E5%85%A8%E9%9B%86",
+        )
+
     def test_www_scheme_case_and_slash(self):
         # 统一 https、去 www、去尾斜杠;路径大小写保留(URL 路径区分大小写)
         self.assertEqual(normalize_url("HTTP://WWW.Example.com/Path/"), "https://example.com/Path")

@@ -9,3 +9,9 @@ fastapi>=0.110
 uvicorn>=0.29
 pydantic>=2.6
 httpx>=0.27
+
+# ---- 可选技能依赖(不装则对应能力自动降级/明确报错)----
+# skills/captcha 字符 OCR: ddddocr>=1.4 + opencv-python>=4.8 + numpy + Pillow
+# skills/captcha 滑块拼图: 同 ddddocr/opencv
+# skills/streaming HLS AES-128 解密: cryptography
+# skills/universal fmp4 合并: ffmpeg 系统命令(apt install ffmpeg)

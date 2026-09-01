@@ -7,16 +7,20 @@ try:
     import cv2
     import numpy as np
 
+    import ddddocr
     from skills.captcha import CaptchaSolver, SolveStatus
     from skills.captcha.preprocess import binarize_otsu, morphology_clean, to_gray, upscale
     from skills.captcha.tools.generate_captchas import generate_captcha
+    _DDDDOCR_OK = hasattr(ddddocr.DdddOcr, "classification") and \
+        hasattr(ddddocr.DdddOcr, "set_ranges")
 except ImportError:  # 环境缺 ddddocr/cv2 时优雅跳过,不阻塞 discover
     cv2 = None
     np = None
     CaptchaSolver = SolveStatus = generate_captcha = None
     to_gray = binarize_otsu = morphology_clean = upscale = None
+    _DDDDOCR_OK = False
 
-_DEP_MISSING = cv2 is None or np is None or CaptchaSolver is None
+_DEP_MISSING = cv2 is None or np is None or CaptchaSolver is None or not _DDDDOCR_OK
 _SKIP = unittest.skipIf(_DEP_MISSING, "缺少 ddddocr/cv2/numpy,请用 venv-demo 的 Python 运行")
 
 SAMPLES = Path(r"C:\Users\sense\Desktop\1\resource-hub-research\ddddocr\samples")

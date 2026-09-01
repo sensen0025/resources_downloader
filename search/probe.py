@@ -118,7 +118,7 @@ def _probe_network(url: str, timeout: float) -> ProbeInfo:
     # 1) HEAD
     try:
         r = _session.head(url, allow_redirects=True, timeout=timeout)
-        if r.status_code not in (403, 405, 501):
+        if r.status_code < 400 and r.status_code not in (403, 405, 501):
             ct = r.headers.get("Content-Type", "")
             size = int(r.headers.get("Content-Length") or -1)
             kind = _classify(r.status_code, ct, ext if is_direct else "")
@@ -126,6 +126,8 @@ def _probe_network(url: str, timeout: float) -> ProbeInfo:
                 status=r.status_code, content_type=ct, size=size,
                 kind=kind, final_url=r.url or url,
             )
+        # HEAD 4xx/5xx 不算数(部分反爬站/CDN 拒绝 HEAD 但 GET 正常),
+        # 落到 2) 的 GET Range 首字节再判定,避免误标 dead/unreachable。
     except requests.RequestException:
         pass
     # 2) GET Range 首字节(HEAD 失败/被禁)

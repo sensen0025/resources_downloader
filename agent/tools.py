@@ -16,6 +16,13 @@ from typing import Optional
 
 from skills.core import ToolResult, tool, get_registry
 
+# 站点信誉技能(LLM 打分 + 向量检索)—— import side-effect 注册 record_site_feedback/site_lookup
+import skills.siterep as _siterep  # noqa: F401
+# B站音频抓取技能(浏览器会话过反爬 + DASH 流提取)
+import skills.bilibili as _bilibili  # noqa: F401
+# AI 本地程序沙盒(read/write/run,自写脚本解决站点特定问题)
+import skills.sandbox as _sandbox  # noqa: F401
+
 # ---------------------------------------------------------------- 邮箱收码
 
 from skills.mail import ImapMailbox, extract_link, extract_verification_code
@@ -133,6 +140,45 @@ def _captcha_tool(charset: str = "", ctx=None) -> ToolResult:
     return ToolResult.failure("验证码识别失败(可能是滑块/点选等类型),请用 human 工具请求人工介入")
 
 
+# ---------------------------------------------------------------- 滑块验证码
+
+@tool(
+    "slide_captcha",
+    "解决滑块拼图验证码(如百度安全验证的拼图滑块):在页面上定位缺口图与背景图,"
+    "检测缺口位置并自动拖拽滑块;失败自动 ±10px 微调重试。"
+    "页面出现'拖动滑块完成拼图'类验证码时调用;需要 ddddocr 或 opencv。",
+    parameters={
+        "type": "object",
+        "properties": {
+            "attempts": {"type": "integer", "description": "拖拽尝试次数,默认 3"},
+        },
+        "required": [],
+    },
+    category="execute",
+    timeout_ms=90_000,
+    concurrency_safe=False,
+)
+def _slide_captcha_tool(attempts: int = 3, ctx=None) -> ToolResult:
+    page = ctx.session.page if ctx and ctx.session else None
+    if page is None:
+        return ToolResult.failure("当前无浏览器页面")
+    from skills.captcha import detect_slide_gap, drag_slider, find_captcha_images
+
+    target, bg, rects = find_captcha_images(page)
+    if not target or not bg:
+        return ToolResult.failure("页面未找到缺口图/背景图(截图检查页面是否真的出现滑块验证码)")
+    gap = detect_slide_gap(target, bg)
+    if gap is None:
+        return ToolResult.failure("缺口检测失败: 需要 ddddocr 或 opencv(参考 skills/captcha 安装说明)")
+    slider_x = rects.get("target", {}).get("x", 0)
+    if slider_x <= 0:
+        slider_x = rects.get("background", {}).get("x", 10)
+    ok = drag_slider(page, gap, slider_x, attempts=attempts)
+    if ok:
+        return ToolResult.success(f"滑块拖拽完成(缺口 x={gap}px),请观察页面是否通过验证")
+    return ToolResult.failure("滑块拖拽 3 次未通过(可能需要人工介入或页面未刷新验证状态)")
+
+
 # ---------------------------------------------------------------- 人工介入
 
 @tool(
@@ -210,11 +256,30 @@ def _format_analysis(a) -> ToolResult:
         lines.append("⚠️ 需要登录/验证码")
     lines.append(f"资源候选 {len(a.resources)} 个:")
     for r in a.best_resources[:10]:
-        lines.append(f"  [{r.kind}] {r.url[:100]}" + (f"  ← {r.text[:40]}" if r.text else ""))
+        # 图片/直链 URL 常超长(如 hdslb CDN ~120 字符),截断到 100 会让 Agent
+        # 拿不到完整直链被迫绕道脚本 —— 对可行动资源放宽到 400 字符
+        limit = 400 if r.kind in ("direct_file", "image", "pan_share", "download_button") else 100
+        lines.append(f"  [{r.kind}] {r.url[:limit]}" + (f"  ← {r.text[:40]}" if r.text else ""))
     return ToolResult.success("\n".join(lines), data=a.to_dict())
 
 
 # ---------------------------------------------------------------- 下载
+
+def _task_out_dir(ctx, default: str) -> str:
+    """任务上下文强制落盘目录。
+
+    Agent 在 fetch_resource 任务内运行时,ctx.task.out_dir 已由任务层注入,
+    所有写文件工具(下载/流式/拼接)必须落到任务目录 —— 否则文件落在
+    downloads/(工作目录),交付层收集不到,网页任务显示 done 却没有下载按钮。
+    独立脚本/账号注册流程(ctx.task 为空)保持默认目录。
+    """
+    if ctx is not None:
+        task = getattr(ctx, "task", None)
+        out = getattr(task, "out_dir", None)
+        if out:
+            return str(out)
+    return default
+
 
 @tool(
     "download",
@@ -241,6 +306,19 @@ def _format_analysis(a) -> ToolResult:
 def _download_tool(url: str, dest_dir: str = "downloads",
                    expected_ext: str = "", min_size: int = 0,
                    use_session: bool = False, ctx=None) -> ToolResult:
+    # 任务上下文强制落到任务目录(否则交付层收不到文件,网页无下载按钮)
+    dest_dir = _task_out_dir(ctx, dest_dir or "downloads")
+    # B站播放页:裸 HTTP 必 412,只有浏览器会话能拿 playinfo → 路由到 bilibili 技能
+    if url and "bilibili.com" in url.lower():
+        from skills.bilibili import bilibili_download
+
+        r = bilibili_download(url, dest_dir, session=(ctx.session if ctx else None))
+        if r.get("ok"):
+            return ToolResult.success(
+                f"B站音频下载成功: {r['path']} ({r['size']} 字节, codecs={r.get('codecs','')})",
+                data=r,
+            )
+        return ToolResult.failure(f"B站下载失败: {r.get('error','')}(需浏览器会话/页面有登录限制)")
     # m3u8 流/播放页 → 万能下载器(自带合并;会话可用时复用其 cookie)
     low = url.lower()
     if low.split("?")[0].endswith((".m3u8", ".m3u")) or ".m3u8" in low:

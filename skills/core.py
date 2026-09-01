@@ -143,10 +143,15 @@ class ToolSpec:
 # ---------------------------------------------------------------- 注册表
 
 class ToolRegistry:
-    """工具注册表:唯一真相源 —— catalog(给模型)/ invoke(执行)/ 展示(给 UI)。"""
+    """工具注册表:唯一真相源 —— catalog(给模型)/ invoke(执行)/ 展示(给 UI)。
+
+    enable/disable 支持「mod 式卸载」:停用的工具不出现在 catalog,
+    invoke 直接拒绝 —— 由 skills/manager.py 驱动。
+    """
 
     def __init__(self) -> None:
         self._tools: dict[str, ToolSpec] = {}
+        self._disabled: set[str] = set()
         self._lock = threading.Lock()
 
     def register(self, spec: ToolSpec) -> None:
@@ -164,18 +169,32 @@ class ToolRegistry:
         return name in self._tools
 
     def all(self) -> list[ToolSpec]:
-        return list(self._tools.values())
+        return [s for n, s in self._tools.items() if n not in self._disabled]
+
+    def disable(self, name: str) -> None:
+        """停用工具(mod 卸载):catalog 消失,invoke 拒绝。"""
+        with self._lock:
+            self._disabled.add(name)
+
+    def enable(self, name: str) -> None:
+        with self._lock:
+            self._disabled.discard(name)
+
+    def disabled_names(self) -> list[str]:
+        return sorted(self._disabled)
 
     def catalog(self, names: Optional[list[str]] = None) -> list[dict]:
-        """给 LLM 的工具目录(OpenAI 格式);names=None 时全部。"""
+        """给 LLM 的工具目录(OpenAI 格式);names=None 时全部(不含停用)。"""
         specs = self._tools.values() if names is None else [self._tools[n] for n in names if n in self._tools]
-        return [s.catalog_entry() for s in specs]
+        return [s.catalog_entry() for s in specs if s.name not in self._disabled]
 
     def invoke(self, name: str, args: dict, ctx: Any = None) -> ToolResult:
         """校验 → 执行 → 规范化结果(对齐 DSH: execute 前必须 validate)。"""
         spec = self._tools.get(name)
         if spec is None or spec.handler is None:
             return ToolResult.failure(f"未知工具 {name!r}")
+        if name in self._disabled:
+            return ToolResult.failure(f"工具 {name!r} 已停用(该技能被卸载/禁用)")
         violations = validate_args(spec.parameters, args or {})
         if violations:
             return ToolResult.failure(
@@ -183,9 +202,13 @@ class ToolRegistry:
                 error="INVALID_ARGS",
             )
         try:
-            kwargs = dict(args or {})
+            # 只注入 handler 签名内的参数:LLM 偶尔带 schema 外的多余字段
+            # (如 human 带 success),硬塞会导致 TypeError,这里静默忽略
+            sig = inspect.signature(spec.handler)
+            params = set(sig.parameters)
+            kwargs = {k: v for k, v in (args or {}).items() if k in params}
             # 按名注入 ctx(browser-use 的"特殊参数按名注入"模式)
-            if ctx is not None and "ctx" in inspect.signature(spec.handler).parameters:
+            if ctx is not None and "ctx" in params:
                 kwargs["ctx"] = ctx
             result = spec.handler(**kwargs)
             if not isinstance(result, ToolResult):

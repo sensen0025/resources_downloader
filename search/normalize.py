@@ -162,18 +162,20 @@ def normalize_url(url: str) -> str:
         path = re.sub(r"/{2,}", "/", path)
         if len(path) > 1:
             path = path.rstrip("/")
-        # 查询参数:丢弃跟踪参数,保留其余(含网盘参数)
-        keep = []
+        # 查询参数:丢弃跟踪参数,保留其余(含网盘参数)。
+        # parse_qsl 会 percent-decode 值(so.com/link?m=%2F..%2B..%3D 这类不透明 token),
+        # 重建时必须重新编码,否则 %2F→/、%2B→+(query 里 + 会被服务端当空格)、%3D→=,
+        # token 被破坏 → 中转链接失效(360 直接回 400 错误页)。
+        keep: list[tuple[str, str]] = []
         if p.query:
             for k, v in urllib.parse.parse_qsl(p.query, keep_blank_values=True):
                 kl = k.lower()
                 if kl in _TRACKING_PARAMS:
                     continue
-                if kl in _PAN_PARAMS and v:
-                    keep.append(f"{k}={v}")
-                elif kl not in _PAN_PARAMS:
-                    keep.append(f"{k}={v}")
-        query = "&".join(keep)
+                if kl in _PAN_PARAMS and not v:
+                    continue
+                keep.append((k, v))
+        query = urllib.parse.urlencode(keep)
         out = urllib.parse.urlunsplit((scheme, host, path, query, ""))
         return out
     except Exception:

@@ -15,6 +15,8 @@ from .rules import (
     has_ad_text,
     is_ad_domain,
     is_ad_url,
+    pool_stats,
+    reload_pool,
 )
 
 __all__ = [
@@ -24,8 +26,10 @@ __all__ = [
     "has_ad_text",
     "ad_penalty",
     "filter_ad_links",
+    "reload_pool",
+    "pool_stats",
     "AD_DOMAIN_SUFFIXES",
     "AD_URL_PATTERNS",
     "AD_TEXT_MARKS",
 ]
-__version__ = "0.1.0"
+__version__ = "0.2.0"

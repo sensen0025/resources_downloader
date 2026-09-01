@@ -15,6 +15,7 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
 # ---- 隔离:必须在 import api.app 之前 ----
 _tmp = tempfile.mkdtemp(prefix="rh_api_test_")
@@ -36,6 +37,23 @@ api_mod.DATA_DIR.mkdir(parents=True, exist_ok=True)
 _store: TaskStore = api_mod._store
 _tokens: TokenStore = api_mod._tokens
 
+# 保存原 fetch_resource,供 tearDownModule 还原(防跨测试文件污染)
+_orig_fetch_resource = None
+import importlib as _il  # noqa: E402
+
+try:
+    _orig_fetch_resource = _il.import_module("agent.tasks.fetch_resource").fetch_resource
+except Exception:
+    pass
+
+
+def tearDownModule():
+    if _orig_fetch_resource is not None:
+        try:
+            _il.import_module("agent.tasks.fetch_resource").fetch_resource = _orig_fetch_resource
+        except Exception:
+            pass
+
 
 class SyncExecutor:
     """同步执行器:submit 直接跑,返回 False 模拟队列满。"""
@@ -53,12 +71,9 @@ class SyncExecutor:
 
 
 def _fake_fetch(result_success: bool = True, file_name: str = "res.litematic",
-                cancel_after: float | None = None, error: str = ""):
-    """假 fetch_resource:写一个文件进 out_dir,按需走取消路径。
-
-    注意:agent/tasks/__init__.py 把包的 fetch_resource 属性重绑成了函数,
-    `import agent.tasks.fetch_resource as fr` 拿到的不是模块 —— 必须用 import_module。
-    """
+                cancel_after: float | None = None, error: str = "",
+                pan_links: list | None = None):
+    """假 fetch_resource:写一个文件进 out_dir,按需走取消路径;可带云盘链接。"""
     import importlib
 
     fr = importlib.import_module("agent.tasks.fetch_resource")
@@ -84,7 +99,8 @@ def _fake_fetch(result_success: bool = True, file_name: str = "res.litematic",
         f = out / file_name
         f.write_bytes(b"fake-resource-content-0123456789")
         return fr.TaskResult(success=result_success, summary="fake done",
-                             files=[str(f)], error=error)
+                             files=[str(f)], error=error,
+                             pan_links=list(pan_links or []))
 
     fr.fetch_resource = fake
     return fake
@@ -152,6 +168,32 @@ class TestTokenLifecycle(APITestCase):
         r = client.get("/api/v1/me", headers={"Authorization": "Bearer rh_live_bogus"})
         self.assertEqual(r.status_code, 401)
 
+    def test_web_request_exempt_from_token(self):
+        """网页同源请求(带 X-RH-Web / Sec-Fetch-Site)免令牌 —— 用户门户打开即用。"""
+        os.environ["RH_API_SECRET"] = "test-secret"
+        client = TestClient(api_mod.app)
+        web_headers = {"X-RH-Web": "1"}
+        # 网页请求无需 Bearer
+        r = client.get("/api/v1/me", headers=web_headers)
+        self.assertEqual(r.status_code, 200)
+        # Sec-Fetch-Site 兜底(浏览器 <a> 导航/下载等场景)
+        r = client.get("/api/v1/tasks", headers={"Sec-Fetch-Site": "same-origin"})
+        self.assertEqual(r.status_code, 200)
+        # 网页可正常创建任务(挂 local owner)
+        r = client.post("/api/v1/tasks", json={"query": "web-task"},
+                        headers=web_headers)
+        self.assertEqual(r.status_code, 202)
+        tid = r.json()["data"]["task_id"]
+        # 网页可下载文件(文件端点免令牌)
+        r = client.get(f"/api/v1/tasks/{tid}/files/res.litematic",
+                       headers={"Sec-Fetch-Site": "same-origin"})
+        self.assertEqual(r.status_code, 200)
+        # 无任何网页标记的程序化请求仍要令牌
+        r = client.get(f"/api/v1/tasks/{tid}/files/res.litematic")
+        self.assertEqual(r.status_code, 403)
+        r = client.get("/api/v1/me")
+        self.assertEqual(r.status_code, 401)
+
 
 class TestTaskContract(APITestCase):
     def test_create_poll_done(self):
@@ -212,7 +254,7 @@ class TestTaskContract(APITestCase):
 
         _install(cancel_after=30)   # 假任务最长等 30s,期间可被取消
         client = TestClient(api_mod.app)
-        tid = _store.create("local", "x")
+        tid = _store.create("ip_testclient", "x")   # 与默认 TestClient 客户端 IP 同租户
         t = threading.Thread(target=api_mod._run_task,
                              args=(tid, TaskRequest(query="x"), "local"),
                              daemon=True)
@@ -237,6 +279,15 @@ class TestTaskContract(APITestCase):
         self.assertEqual(r.json()["data"]["total"], 3)
         r = client.get("/api/v1/tasks?status=bogus")
         self.assertEqual(r.status_code, 422)
+
+    def test_pan_links_in_payload(self):
+        """云盘分享链接随任务结果返回(用户门户展示用)。"""
+        _install(pan_links=["https://pan.baidu.com/s/1abc123"])
+        client = TestClient(api_mod.app)
+        r = client.post("/api/v1/tasks", json={"query": "x"})
+        task_id = r.json()["data"]["task_id"]
+        body = client.get(f"/api/v1/tasks/{task_id}").json()["data"]
+        self.assertIn("https://pan.baidu.com/s/1abc123", body["pan_links"])
 
 
 class TestIsolation(APITestCase):
@@ -329,6 +380,22 @@ class TestFileDelivery(APITestCase):
         r = client.get(f"/api/v1/tasks/{task_id}/files/..%2F..%2Fcredentials.json")
         self.assertEqual(r.status_code, 404)
 
+    def test_chinese_filename_download(self):
+        """中文文件名(RFC 5987 filename*)不能触发 latin-1 头部编码 500。"""
+        _install(file_name="临渊行.txt")
+        client = TestClient(api_mod.app)
+        r = client.post("/api/v1/tasks", json={"query": "小说"})
+        task_id = r.json()["data"]["task_id"]
+        import urllib.parse
+
+        url = f"/api/v1/tasks/{task_id}/files/" + urllib.parse.quote("临渊行.txt")
+        r = client.get(url)
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.content, b"fake-resource-content-0123456789")
+        dispo = r.headers.get("content-disposition") or ""
+        self.assertIn("filename*=UTF-8''", dispo)
+        self.assertIn(urllib.parse.quote("临渊行.txt"), dispo)
+
 
 class TestSSE(APITestCase):
     def test_sse_stream(self):
@@ -344,8 +411,14 @@ class TestSSE(APITestCase):
                     lines.append(line)
         joined = "\n".join(lines)
         self.assertIn("event: stage", joined)
-        self.assertIn("event: done", joined)
         self.assertIn("fake search", joined)
+        # 终态帧只发一次,且 data 含 status(存库 done 事件不再重放,
+        # 否则网页 log 出现 "undefined: 任务结束: undefined")
+        done_frames = [i for i, l in enumerate(lines) if l == "event: done"]
+        self.assertEqual(len(done_frames), 1)
+        data_line = lines[done_frames[0] + 1]
+        self.assertIn('"status"', data_line)
+        self.assertIn('"done"', data_line)
 
 
 class TestWebhook(APITestCase):
@@ -379,6 +452,137 @@ class TestMe(APITestCase):
         self.assertEqual(data["tasks"], 1)
         self.assertEqual(data["token_mode"], False)
         self.assertIn("storage_bytes", data)
+
+
+class TestIPIsolation(APITestCase):
+    """缺陷 3:公网所有访客共享 local 历史 —— 改为按 IP 的租户隔离。"""
+
+    def test_web_tenants_isolated_by_ip(self):
+        c1 = TestClient(api_mod.app, client=("1.2.3.4", 10001))
+        c2 = TestClient(api_mod.app, client=("5.6.7.8", 10002))
+        r = c1.post("/api/v1/tasks", json={"query": "A 的秘密任务"}, headers={"X-RH-Web": "1"})
+        tid = r.json()["data"]["task_id"]
+        # A 能看到自己的任务
+        self.assertEqual(c1.get(f"/api/v1/tasks/{tid}", headers={"X-RH-Web": "1"}).status_code, 200)
+        # B 看不到(404 不泄露存在性)
+        self.assertEqual(c2.get(f"/api/v1/tasks/{tid}", headers={"X-RH-Web": "1"}).status_code, 404)
+        # B 的历史为空
+        self.assertEqual(c2.get("/api/v1/tasks", headers={"X-RH-Web": "1"}).json()["data"]["total"], 0)
+        # B 拿不到 A 的文件(403)
+        r2 = c2.get(f"/api/v1/tasks/{tid}/files/res.litematic", headers={"X-RH-Web": "1"})
+        self.assertEqual(r2.status_code, 403)
+
+    def test_anonymous_programmatic_isolated_by_ip(self):
+        # 个人模式:无 Bearer 的程序化请求(如审计里的 curl)同样按 IP 隔离
+        c1 = TestClient(api_mod.app, client=("9.9.9.9", 20001))
+        c2 = TestClient(api_mod.app, client=("8.8.8.8", 20002))
+        c1.post("/api/v1/tasks", json={"query": "curl 任务"})
+        self.assertEqual(c2.get("/api/v1/tasks").json()["data"]["total"], 0)
+
+
+class TestAdminGate(APITestCase):
+    """缺陷 1:配置读取/覆写必须管理员(RH_ADMIN_TOKEN 或回环);缺陷 2/4 同门禁。"""
+
+    def setUp(self):
+        super().setUp()
+        self.addCleanup(os.environ.pop, "RH_ADMIN_TOKEN", None)
+
+    def test_settings_write_and_read_require_admin(self):
+        os.environ["RH_ADMIN_TOKEN"] = "rh_admin_secret_1"
+        client = TestClient(api_mod.app)
+        # 无管理员凭证 → 403(原缺陷 1:公网任意覆写配置锁死控制台)
+        self.assertEqual(client.get("/api/v1/settings").status_code, 403)
+        self.assertEqual(client.put("/api/v1/settings", json={"llm_model": "x"}).status_code, 403)
+        # 带管理员令牌 → 200(PUT 打桩 update_env,不碰真实 .env)
+        h = {"X-RH-Admin": "rh_admin_secret_1"}
+        self.assertEqual(client.get("/api/v1/settings", headers=h).status_code, 200)
+        with mock.patch.object(api_mod, "update_env", return_value=[]) as m:
+            r = client.put("/api/v1/settings", json={"llm_model": "x"}, headers=h)
+            self.assertEqual(r.status_code, 200)
+            self.assertTrue(m.called)
+
+    def test_admin_via_bearer_and_loopback(self):
+        os.environ["RH_ADMIN_TOKEN"] = "rh_admin_secret_2"
+        client = TestClient(api_mod.app)
+        self.assertEqual(
+            client.get("/api/v1/settings",
+                       headers={"Authorization": "Bearer rh_admin_secret_2"}).status_code, 200)
+        loop = TestClient(api_mod.app, client=("127.0.0.1", 30001))
+        self.assertEqual(loop.get("/api/v1/settings").status_code, 200)  # 回环免令牌
+
+    def test_scan_and_test_llm_require_admin(self):
+        os.environ["RH_ADMIN_TOKEN"] = "rh_admin_secret_3"
+        client = TestClient(api_mod.app)
+        self.assertEqual(client.post("/api/v1/scan", json={"path": "/etc/passwd"}).status_code, 403)
+        self.assertEqual(client.post("/api/v1/test-llm").status_code, 403)
+
+
+class TestScanSandbox(APITestCase):
+    """缺陷 2:扫描路径沙箱 —— 只允许 downloads/ 与 data/tasks/。"""
+
+    def setUp(self):
+        super().setUp()
+        os.environ["RH_ADMIN_TOKEN"] = "rh_admin_secret_4"
+        self.addCleanup(os.environ.pop, "RH_ADMIN_TOKEN", None)
+
+    def test_system_paths_rejected(self):
+        client = TestClient(api_mod.app)
+        h = {"X-RH-Admin": "rh_admin_secret_4"}
+        self.assertEqual(client.post("/api/v1/scan", json={"path": "/etc/passwd"}, headers=h).status_code, 403)
+        self.assertEqual(client.post("/api/v1/scan", json={"path": ".env"}, headers=h).status_code, 403)
+        self.assertEqual(client.post("/api/v1/scan", json={"path": "../../.env"}, headers=h).status_code, 403)
+
+    def test_task_dir_allowed(self):
+        client = TestClient(api_mod.app)
+        h = {"X-RH-Admin": "rh_admin_secret_4"}
+        r = client.post("/api/v1/tasks", json={"query": "x"})
+        tid = r.json()["data"]["task_id"]
+        p = api_mod.DATA_DIR / "ip_testclient" / tid / "res.litematic"
+        r = client.post("/api/v1/scan", json={"path": str(p)}, headers=h)
+        self.assertEqual(r.status_code, 200)
+        self.assertIn("verdict", r.json()["data"])
+
+
+class TestLlmRateLimit(APITestCase):
+    """缺陷 4:test-llm 需管理员 + IP 频控(防刷额度)。"""
+
+    def setUp(self):
+        super().setUp()
+        os.environ["RH_ADMIN_TOKEN"] = "rh_admin_secret_5"
+        self.addCleanup(os.environ.pop, "RH_ADMIN_TOKEN", None)
+        from api.ratelimit import reset as reset_limits
+
+        reset_limits()
+
+    def test_rate_limited_after_5_per_minute(self):
+        client = TestClient(api_mod.app)
+        h = {"X-RH-Admin": "rh_admin_secret_5"}
+        fake = mock.MagicMock()
+        fake.return_value.chat.return_value = "OK"
+        with mock.patch("agent.llm.LLMClient", fake):
+            codes = [client.post("/api/v1/test-llm", headers=h).status_code for _ in range(6)]
+        self.assertEqual(codes[:5], [200] * 5)
+        self.assertEqual(codes[5], 429)
+
+
+class TestInputLimits(APITestCase):
+    """缺陷 5:任务入参边界校验,防超长 Query 撑爆 LLM/正则(ReDoS)。"""
+
+    def test_query_too_long_rejected(self):
+        client = TestClient(api_mod.app)
+        self.assertEqual(client.post("/api/v1/tasks", json={"query": "x" * 501}).status_code, 422)
+
+    def test_seed_urls_limits(self):
+        client = TestClient(api_mod.app)
+        r = client.post("/api/v1/tasks", json={"seed_urls": [f"https://x.com/{i}" for i in range(21)]})
+        self.assertEqual(r.status_code, 422)
+        r = client.post("/api/v1/tasks", json={"seed_urls": ["https://x.com/" + "a" * 3000]})
+        self.assertEqual(r.status_code, 422)
+
+    def test_file_types_bad_item_rejected(self):
+        client = TestClient(api_mod.app)
+        self.assertEqual(client.post("/api/v1/tasks", json={"file_types": ["txt"]}).status_code, 422)
+        self.assertEqual(client.post("/api/v1/tasks", json={"file_types": ["." + "x" * 20]}).status_code, 422)
 
 
 if __name__ == "__main__":

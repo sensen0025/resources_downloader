@@ -17,11 +17,13 @@ class TaskResult:
     summary: str = ""
     files: list[str] = field(default_factory=list)
     sources: list[str] = field(default_factory=list)
+    pan_links: list[str] = field(default_factory=list)  # 爬取到的网盘分享链接
     error: str = ""
 
     def to_dict(self) -> dict:
         return {"success": self.success, "summary": self.summary,
-                "files": self.files, "sources": self.sources, "error": self.error}
+                "files": self.files, "sources": self.sources,
+                "pan_links": self.pan_links, "error": self.error}
 
 
 @dataclass

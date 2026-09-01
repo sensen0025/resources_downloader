@@ -88,6 +88,11 @@ def relevance_score(query: str, r: SearchResult) -> float:
         score += 2.0
     if any(h in host for h in RESOURCE_HOST_HINTS):
         score += 1.0
+    # 引擎中转/跳转链接(so.com/link?m=…、baidu.com/link、bing.com/ck/a)不是资源页,
+    # 且有有效期;有真实 URL 的候选应排前面。
+    low_url = r.url.lower()
+    if "so.com/link" in low_url or "baidu.com/link" in low_url or "bing.com/ck/a" in low_url:
+        score -= 3.0
     # 广告过滤:广告域名/URL 模式扣大分,文本标记扣分(adblock 数据池)
     score -= ad_penalty(r.url, r.title, r.snippet)
     return round(score, 3)

@@ -22,6 +22,7 @@ CF_MARKERS = (
     "just a moment", "cf-challenge", "cf_chl", "__cf_chl",
     "cf-browser-verification", "checking your browser", "verify you are human",
     "安全验证", "请稍候", "cf_clearance",
+    "attention required",  # CF 硬墙 403(IP 风控/高风险判定),通常连浏览器也过不去
 )
 
 

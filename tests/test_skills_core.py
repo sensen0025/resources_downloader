@@ -58,7 +58,22 @@ class TestRegistry(unittest.TestCase):
         # 非法(缺必填)
         r = reg.invoke("dl", {})
         self.assertFalse(r.ok)
-        self.assertIn("INVALID_ARGS", r.error)
+
+    def test_extra_args_ignored(self):
+        """LLM 偶尔带 schema 外多余字段(如 human 带 success)→ 忽略不 TypeError。"""
+        reg = _fresh_registry()
+
+        def handler(question: str) -> ToolResult:
+            return ToolResult.success(f"q={question}")
+
+        reg.register(ToolSpec(name="human", description="ask",
+                              parameters={"type": "object",
+                                          "properties": {"question": {"type": "string"}},
+                                          "required": ["question"]},
+                              category="other", handler=handler))
+        r = reg.invoke("human", {"question": "hi", "success": True, "extra": 1})
+        self.assertTrue(r.ok)
+        self.assertIn("q=hi", r.message)
         # 未知工具
         r = reg.invoke("nope", {})
         self.assertFalse(r.ok)

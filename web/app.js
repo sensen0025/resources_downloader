@@ -3,18 +3,22 @@
 
 const $ = (id) => document.getElementById(id);
 const TOKEN_KEY = "rh_console_token";
+const ADMIN_KEY = "rh_admin_token";
 let TOKEN = localStorage.getItem(TOKEN_KEY) || "";
+let ADMIN_TOKEN = localStorage.getItem(ADMIN_KEY) || "";
 
 // ---------------- API 基础 ----------------
+// 网页访问免令牌:统一带 X-RH-Web 标记(令牌只约束程序化 API 客户端)
+const WEB_HEADERS = { "X-RH-Web": "1" };
 async function api(path, opts = {}) {
-  const headers = { "Content-Type": "application/json", ...(opts.headers || {}) };
+  const headers = { "Content-Type": "application/json", ...WEB_HEADERS, ...(opts.headers || {}) };
   if (TOKEN) headers["Authorization"] = "Bearer " + TOKEN;
+  if (ADMIN_TOKEN) headers["X-RH-Admin"] = ADMIN_TOKEN;
   const resp = await fetch(path, { ...opts, headers });
   let body = null;
   try { body = await resp.json(); } catch (e) { /* 非 JSON */ }
   if (resp.status === 401) {
-    showLogin(true);
-    throw new Error("需要令牌登录");
+    throw new Error("需要令牌(网页会话异常,刷新页面重试)");
   }
   if (!resp.ok || (body && body.code !== 0)) {
     const msg = (body && (body.message || body.detail)) || `HTTP ${resp.status}`;
@@ -34,7 +38,8 @@ function toast(msg, isErr = false) {
 
 // SSE over fetch(带 Authorization;解析 event/data 行)
 async function sse(path, handlers) {
-  const headers = TOKEN ? { Authorization: "Bearer " + TOKEN } : {};
+  const headers = { ...WEB_HEADERS };
+  if (TOKEN) headers["Authorization"] = "Bearer " + TOKEN;
   const resp = await fetch(path, { headers });
   if (!resp.ok) throw new Error(`SSE HTTP ${resp.status}`);
   const reader = resp.body.getReader();
@@ -75,10 +80,9 @@ async function refreshStatus() {
     set("llm", st.llm_key_set, st.llm_key_set ? "已配置" : "未配置");
     set("mail", st.mail_set, st.mail_set ? "已配置" : "未配置");
     set("proxy", !!st.proxy_url, st.proxy_url ? st.proxy_url.replace(/^https?:\/\//, "").slice(0, 22) : "直连");
-    set("token", !!st.token_mode, st.token_mode ? "强制" : "个人");
+    set("token", !!st.token_mode, st.token_mode ? "仅程序化API" : "个人");
     set("clamav", st.clamav, st.clamav ? "ClamAV ✅" : "仅启发式");
-    $("loginBtn").style.display = st.token_mode ? "" : "none";
-  } catch (e) { /* 401 会触发登录框 */ }
+  } catch (e) { /* 网页会话异常 */ }
 }
 
 // ---------------- Tab 切换 ----------------
@@ -105,20 +109,22 @@ const KIND_TYPES = {
 
 async function submitTask() {
   const query = $("dlQuery").value.trim();
-  if (!query) return toast("请输入要下载的内容", true);
+  if (!query) return toast("请输入想要获取的内容", true);
   const kind = $("dlKind").value;
   const payload = {
     query,
     label: query.slice(0, 40),
     file_types: kind === "auto" ? [] : KIND_TYPES[kind],
     login_email: $("dlEmail").value.trim(),
-    callback_url: $("dlCallback").value.trim(),
   };
   $("dlSubmit").disabled = true;
   $("dlCancel").disabled = false;
   $("dlProgress").hidden = false;
   $("dlEvents").textContent = "";
   $("dlFiles").innerHTML = "";
+  $("dlPanLinks").innerHTML = "";
+  $("dlPanCard").hidden = true;
+  $("dlFilesCard").hidden = true;
   $("dlBar").style.width = "0%";
   $("dlStage").textContent = "queued";
   $("dlStage").className = "badge";
@@ -128,35 +134,92 @@ async function submitTask() {
     $("dlTaskId").textContent = data.task_id;
     logEvent("queued", "任务已提交,file_token=" + (data.file_token || "").slice(0, 8) + "…");
     const tid = data.task_id;
-    await sse(data.events_url, {
-      stage: (e) => {
-        const pct = e.percent || 0;
-        $("dlStage").textContent = e.stage || "stage";
-        $("dlStage").className = "badge running";
-        $("dlBar").style.width = pct + "%";
-        $("dlStageMsg").textContent = (e.message || "") + (pct ? ` [${pct}%]` : "");
-        logEvent(e.stage, e.message || "");
-      },
-      done: async (e) => {
-        $("dlStage").textContent = e.status;
-        $("dlStage").className = "badge " + e.status;
-        $("dlBar").style.width = "100%";
-        logEvent(e.status, "任务结束: " + e.status);
-        if (e.status === "done") {
-          const task = await api(`/api/v1/tasks/${tid}`);
-          renderFiles(task.files, $("dlFiles"), tid);
-        }
-        $("dlSubmit").disabled = false;
-        $("dlCancel").disabled = true;
-      },
-      failed: async (e) => { $("dlSubmit").disabled = false; $("dlCancel").disabled = true; logEvent("failed", "任务失败"); },
-      cancelled: async (e) => { $("dlSubmit").disabled = false; $("dlCancel").disabled = true; logEvent("cancelled", "任务已取消"); },
-    });
+    _taskEventsSeen = 0;
+    _taskFinished = false;
+    try {
+      await sse(data.events_url, {
+        stage: (e) => renderStageEvent(tid, e),
+        done: async (e) => {
+          if (e.status) { logEvent(e.status, "任务结束: " + e.status); await finishTask(tid); }
+        },
+        failed: async () => { logEvent("failed", "任务失败"); await finishTask(tid); },
+        cancelled: async () => { logEvent("cancelled", "任务已取消"); await finishTask(tid); },
+      });
+    } finally {
+      // SSE 流结束(网络波动/手机息屏切回/服务端关闭)而任务未终态 → 轮询补偿,
+      // 进度条不再永久卡在中间状态
+      pollUntilDone(tid);
+    }
   } catch (e) {
     logEvent("error", String(e.message || e));
     toast("提交失败: " + (e.message || e), true);
     $("dlSubmit").disabled = false;
     $("dlCancel").disabled = true;
+  }
+}
+
+// ---------------- 任务进度(SSE 实时 + 轮询补偿双通道) ----------------
+let _taskEventsSeen = 0;   // 轮询补偿时已渲染的事件数
+let _taskFinished = false; // 终态已处理(防止双通道重复渲染)
+
+function renderStageEvent(tid, e) {
+  const pct = e.percent || 0;
+  $("dlStage").textContent = e.stage || "stage";
+  $("dlStage").className = "badge running";
+  $("dlBar").style.width = pct + "%";
+  $("dlStageMsg").textContent = (e.message || "") + (pct ? ` [${pct}%]` : "");
+  logEvent(e.stage, e.message || "");
+}
+
+async function finishTask(tid) {
+  if (_taskFinished) return;
+  _taskFinished = true;
+  let task;
+  try { task = await api(`/api/v1/tasks/${tid}`); }
+  catch (e) {
+    $("dlStageMsg").textContent = "任务已结束(状态获取失败)";
+    $("dlSubmit").disabled = false;
+    $("dlCancel").disabled = true;
+    return;
+  }
+  const st = task.status || "done";
+  $("dlStage").textContent = st;
+  $("dlStage").className = "badge " + st;
+  $("dlBar").style.width = "100%";
+  if (st === "done") {
+    renderPanLinks(task.pan_links || [], $("dlPanLinks"));
+    $("dlPanCard").hidden = !(task.pan_links || []).length;
+    $("dlPanCount").textContent = `(${(task.pan_links || []).length})`;
+    renderFiles(task.files, $("dlFiles"), tid);
+    $("dlFilesCard").hidden = !(task.files || []).length;
+    $("dlFilesCount").textContent = `(${(task.files || []).length})`;
+    $("dlStageMsg").textContent = (task.result && task.result.summary) || "任务完成";
+  } else if (st === "failed") {
+    // 失败也可能带回云盘链接(用户可手动去网盘)
+    renderPanLinks(task.pan_links || [], $("dlPanLinks"));
+    $("dlPanCard").hidden = !(task.pan_links || []).length;
+    $("dlPanCount").textContent = `(${(task.pan_links || []).length})`;
+    $("dlStageMsg").textContent = `任务失败: ${(task.result && task.result.summary) || task.error || ""}`;
+  } else {
+    $("dlStageMsg").textContent = `任务已${st}`;
+  }
+  $("dlSubmit").disabled = false;
+  $("dlCancel").disabled = true;
+}
+
+async function pollUntilDone(tid, attempts = 400) {
+  for (let i = 0; i < attempts && !_taskFinished; i++) {
+    try {
+      const task = await api(`/api/v1/tasks/${tid}`);
+      const evs = task.events || [];
+      for (const e of evs.slice(_taskEventsSeen)) {
+        if (e.type === "stage") renderStageEvent(tid, e);
+        else logEvent(e.type, e.message || "");
+      }
+      _taskEventsSeen = evs.length;
+      if (["done", "failed", "cancelled"].includes(task.status)) { await finishTask(tid); return; }
+    } catch (e) { /* 网络抖动:下一轮再试 */ }
+    await new Promise((r) => setTimeout(r, 2500));
   }
 }
 
@@ -167,11 +230,24 @@ function logEvent(ev, msg) {
 }
 
 $("dlSubmit").addEventListener("click", submitTask);
+// 示例 prompt 一键填充
+document.querySelectorAll("#dlChips .chip").forEach((c) => {
+  c.addEventListener("click", () => {
+    $("dlQuery").value = c.dataset.q;
+    $("dlQuery").focus();
+  });
+});
 $("dlCancel").addEventListener("click", async () => {
   const tid = $("dlTaskId").textContent.trim();
   if (!tid) return;
-  try { await api(`/api/v1/tasks/${tid}/cancel`, { method: "POST" }); logEvent("cancel", "已请求取消"); }
-  catch (e) { toast(e.message, true); }
+  // 即时反馈:立刻进入 cancelling 灰色等待态(不再显示"仍在运行"造成"取消无效"困惑)
+  $("dlCancel").disabled = true;
+  $("dlStage").textContent = "cancelling";
+  $("dlStage").className = "badge cancelling";
+  $("dlStageMsg").textContent = "取消请求已提交,任务正在停止…";
+  logEvent("cancel", "已请求取消,等待任务停止…");
+  try { await api(`/api/v1/tasks/${tid}/cancel`, { method: "POST" }); }
+  catch (e) { toast(e.message, true); $("dlCancel").disabled = false; }
 });
 
 // ---------------- 历史 ----------------
@@ -207,11 +283,59 @@ async function showHistoryDetail(tid) {
     $("histDetailBody").textContent =
       `查询: ${t.query || ""}\n状态: ${t.status}\n阶段: ${t.stage} ${t.percent}%\n` +
       `结果: ${res.summary || ""}\n错误: ${t.error || res.error || "(无)"}\n\n-- 事件流 --\n${evs}`;
+    // 云盘链接 + 文件
+    const panBox = document.getElementById("histPan");
+    if (panBox) {
+      const pan = t.pan_links || [];
+      panBox.hidden = !pan.length;
+      panBox.querySelector(".pan-grid").innerHTML = "";
+      renderPanLinks(pan, panBox.querySelector(".pan-grid"));
+    }
     renderFiles(t.files || [], $("histDetailFiles"), tid);
   } catch (e) { toast(e.message, true); }
 }
 
 $("histRefresh").addEventListener("click", loadHistory);
+
+// ---------------- 云盘链接卡片 ----------------
+function panInfo(url) {
+  const u = new URL(url);
+  const h = u.hostname;
+  if (h.includes("pan.baidu.com")) return { icon: "📗", label: "百度网盘" };
+  if (h.includes("quark")) return { icon: "🔵", label: "夸克网盘" };
+  if (h.includes("alipan") || h.includes("aliyundrive")) return { icon: "📘", label: "阿里云盘" };
+  if (h.includes("lanzou")) return { icon: "🔶", label: "蓝奏云" };
+  if (h.includes("123pan")) return { icon: "🔷", label: "123云盘" };
+  if (h.includes("115")) return { icon: "🟣", label: "115 网盘" };
+  if (h.includes("pan.xunlei") || h.includes("xl")) return { icon: "🟢", label: "迅雷云盘" };
+  return { icon: "📎", label: h.replace(/^www\./, "") };
+}
+
+function renderPanLinks(links, container) {
+  container.innerHTML = "";
+  if (!links || !links.length) {
+    container.innerHTML = '<p class="hint">(未发现网盘分享链接)</p>';
+    return;
+  }
+  for (const raw of links) {
+    let info;
+    try { info = panInfo(raw); } catch (e) { info = { icon: "📎", label: "链接" }; }
+    const card = document.createElement("div");
+    card.className = "pan-card";
+    card.innerHTML = `
+      <div class="pan-title">${info.icon} ${esc(info.label)}</div>
+      <div class="pan-url mono">${esc(raw.slice(0, 90))}</div>
+      <div class="form-row">
+        <a class="btn sm primary" href="${esc(raw)}" target="_blank" rel="noopener">打开</a>
+        <button class="btn sm copy-btn">复制</button>
+      </div>`;
+    card.querySelector(".copy-btn").addEventListener("click", async () => {
+      try { await navigator.clipboard.writeText(raw); toast("✅ 已复制链接"); }
+      catch (e) { toast("复制失败,请手动选择复制", true); }
+    });
+    container.appendChild(card);
+  }
+}
 
 // ---------------- 文件卡片 ----------------
 function renderFiles(files, container, tid) {
@@ -237,6 +361,7 @@ const CFG_FIELDS = ["llm_api_key", "llm_base_url", "llm_model", "mail_imap_host"
 async function loadSettings() {
   try {
     const { fields } = await api("/api/v1/settings");
+    $("cfgAdminBox").hidden = true;
     for (const f of CFG_FIELDS) {
       const el = $("cfg_" + f);
       const v = fields[f];
@@ -244,8 +369,21 @@ async function loadSettings() {
       el.dataset.masked = v.set && v.sensitive ? v.value : "";
       el.value = "";
     }
-  } catch (e) { toast(e.message, true); }
+  } catch (e) {
+    // 配置读取需要管理员凭证 → 显示解锁框
+    $("cfgAdminBox").hidden = false;
+    toast(e.message, true);
+  }
 }
+
+$("cfgAdminUnlock").addEventListener("click", () => {
+  const t = $("cfgAdminToken").value.trim();
+  if (!t) return toast("请输入管理员令牌", true);
+  ADMIN_TOKEN = t;
+  localStorage.setItem(ADMIN_KEY, t);
+  $("cfgAdminToken").value = "";
+  loadSettings();
+});
 
 $("cfgSave").addEventListener("click", async () => {
   const payload = {};
@@ -277,12 +415,13 @@ $("cfgTestLlm").addEventListener("click", async () => {
 });
 
 // ---------------- 令牌 ----------------
+// ---------------- 令牌 tab(仅程序化 API 客户端使用) ----------------
 $("tokApply").addEventListener("click", async () => {
   try {
     const data = await api("/api/v1/tokens", { method: "POST", body: JSON.stringify({ name: $("tokName").value.trim() }) });
     const box = $("tokNewKey");
     box.hidden = false;
-    box.textContent = `token_key: ${data.token_key}\n(明文仅此一次! 请立即保存,遗失只能轮换)\nowner: ${data.owner}`;
+    box.textContent = `token_key: ${data.token_key}\n(申请一次长期有效,明文仅此一次! 程序化 API 用它做 Bearer 认证;网页访问无需令牌)\nowner: ${data.owner}`;
     await loadTokens();
   } catch (e) { toast(e.message, true); }
 });
@@ -344,23 +483,6 @@ $("scanBtn").addEventListener("click", async () => {
   } catch (e) { toast(e.message, true); }
   $("scanBtn").disabled = false;
 });
-
-// ---------------- 登录弹窗 ----------------
-function showLogin(show) {
-  $("loginModal").hidden = !show;
-  if (show) $("loginToken").focus();
-}
-$("loginBtn").addEventListener("click", () => showLogin(true));
-$("loginOk").addEventListener("click", async () => {
-  const t = $("loginToken").value.trim();
-  if (!t) return;
-  TOKEN = t;
-  localStorage.setItem(TOKEN_KEY, t);
-  showLogin(false);
-  try { await refreshStatus(); toast("✅ 已登录"); }
-  catch (e) { toast("令牌无效: " + e.message, true); }
-});
-$("loginCancel").addEventListener("click", () => showLogin(false));
 
 // ---------------- 工具函数 ----------------
 function esc(s) { return String(s == null ? "" : s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c])); }

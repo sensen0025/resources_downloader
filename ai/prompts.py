@@ -49,7 +49,10 @@ __SKILLS__
    等校验通过或走浏览器会话,不要放弃该候选。
 6. 来源站优先:意图的 sources_hint 给了建议来源站(如皮肤→mcskins.org/namemc.com;
    投影→minecraft-schematics.com)时,优先访问这些站,不要从无关文章页抓装饰图凑数。
-7. 不要臆造候选 URL 或文件路径;一切以技能返回为准。"""
+7. 网盘链接:候选或页面里出现 pan.quark.cn/s/xxx 分享链接时,先用 quark_resolve
+   看清单确认目标资源,再 quark_download 下载(自动转存+直链,需已配置夸克 Cookie;
+   报"需 Cookie"就换其它候选,不要死磕)。
+8. 不要臆造候选 URL 或文件路径;一切以技能返回为准。"""
 
 
 def build_system_prompt(catalog: list[dict], max_steps: int, stall_limit: int) -> str:

@@ -131,6 +131,14 @@
         <button class="btn secondary" id="cfgTestLlm">Test Connection</button>
         <span id="cfgMsg" class="stage-msg"></span>
       </div>
+      <div class="card" id="cfgAdminBox" hidden style="margin-top:12px">
+        <h3>管理员解锁</h3>
+        <p class="hint">修改配置 / 查毒扫描 / LLM 测试需要管理员凭证(RH_ADMIN_TOKEN,在服务器 .env 设置)。输入一次,浏览器记住。</p>
+        <div class="form-row">
+          <input id="cfgAdminToken" class="input grow" type="password" placeholder="RH_ADMIN_TOKEN">
+          <button class="btn primary" id="cfgAdminUnlock">解锁</button>
+        </div>
+      </div>
     </div>
   </section>
 

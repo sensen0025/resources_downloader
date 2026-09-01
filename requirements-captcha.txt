@@ -1,6 +1,0 @@
-# skills/captcha — 图形验证码识别
-# 已安装于 resource-hub-research/venv-demo;其他环境:
-ddddocr>=1.4
-opencv-python>=4.8
-numpy>=1.24
-Pillow>=9

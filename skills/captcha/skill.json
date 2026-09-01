@@ -1,0 +1,7 @@
+{
+  "name": "captcha",
+  "version": "0.1.0",
+  "description": "图形验证码:OCR+VLM+滑块拼图",
+  "tools": ["captcha", "slide_captcha"],
+  "requires": []
+}

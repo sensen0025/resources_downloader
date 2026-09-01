@@ -112,7 +112,12 @@ class PageObservation:
         self.body_text = body_text
 
     def to_prompt(self) -> str:
-        lines = [f"URL: {self.url}", f"标题: {self.title}", "", "可交互元素:"]
+        # 超长 URL(so.com/link?m=… 等中转链接 1000+ 字符)截断展示:
+        # 全量喂给 LLM 会诱导模型把整个 URL 回填到 goto,决策 JSON 超长被截断而解析失败。
+        url_disp = self.url
+        if len(url_disp) > 140:
+            url_disp = url_disp[:140] + "…(超长,见元素 href 或 wait 等 JS 跳转)"
+        lines = [f"URL: {url_disp}", f"标题: {self.title}", "", "可交互元素:"]
         if not self.elements:
             lines.append("  (未发现可交互元素)")
         for el in self.elements:

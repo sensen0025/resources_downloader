@@ -12,6 +12,18 @@ from typing import Optional
 
 from skills.core import ToolResult, tool, get_registry
 
+
+def _task_out_dir(ctx, default: str) -> str:
+    """任务上下文强制落盘目录(与 agent/tools.py 一致):
+    fetch_resource 任务内 ctx.task.out_dir 已注入,写文件必须落到任务目录,
+    否则文件在 downloads/ 交付层收不到,网页 done 却没有下载按钮。"""
+    if ctx is not None:
+        task = getattr(ctx, "task", None)
+        out = getattr(task, "out_dir", None)
+        if out:
+            return str(out)
+    return default
+
 # ---------------------------------------------------------------- 意图解析
 
 @tool(
@@ -74,14 +86,14 @@ def _intent_parse_tool(request: str, ctx=None) -> ToolResult:
 @tool(
     "search",
     "多引擎检索 + AI 语义重排。返回按相关性排序的候选列表,已剔除与意图无关的结果。"
-    "engines 可指定(如 [\"bing\",\"baidu\"]),缺省全部;per_engine 每引擎取几条(默认 8);"
+    "engines 可指定(如 [\"bing\",\"baidu\"]),缺省全部;per_engine 每引擎取几条(默认 12);"
     "rerank=true(默认)时用 AI 批量打分。",
     parameters={
         "type": "object",
         "properties": {
             "query": {"type": "string", "description": "检索词(可用意图重写后的 query)"},
             "engines": {"type": "array", "items": {"type": "string"}, "description": "引擎列表,可省"},
-            "per_engine": {"type": "integer", "description": "每引擎条数,默认 8"},
+            "per_engine": {"type": "integer", "description": "每引擎条数,默认 12"},
             "rerank": {"type": "boolean", "description": "是否 AI 语义重排,默认 true"},
         },
         "required": ["query"],
@@ -89,7 +101,7 @@ def _intent_parse_tool(request: str, ctx=None) -> ToolResult:
     category="search",
     timeout_ms=120_000,
 )
-def _search_tool(query: str, engines: Optional[list] = None, per_engine: int = 8,
+def _search_tool(query: str, engines: Optional[list] = None, per_engine: int = 12,
                  rerank: bool = True, ctx=None) -> ToolResult:
     from search import search as search_all
 
@@ -255,6 +267,8 @@ def _download_stream_tool(url: str, dest_dir: str = "downloads", filename: str =
                           ctx=None) -> ToolResult:
     from skills.streaming import stream_download
 
+    dest_dir = _task_out_dir(ctx, dest_dir or "downloads")
+
     def on_progress(done: int, total: int) -> None:
         if ctx and ctx.state:
             pass  # 进度由任务层 on_stage 上报,这里保持静默
@@ -296,6 +310,7 @@ def _universal_download_tool(url: str, dest_dir: str = "downloads",
                              ctx=None) -> ToolResult:
     from skills.universal import universal_download
 
+    dest_dir = _task_out_dir(ctx, dest_dir or "downloads")
     r = universal_download(url, dest_dir, filename=filename, referer=referer)
     if r.ok:
         return ToolResult.success(
@@ -351,6 +366,91 @@ def _inspect_archive_tool(path: str, ctx=None) -> ToolResult:
                                     "ext_counter": dict(counter.most_common(6))})
 
 
+# ---------------------------------------------------------------- 夸克网盘
+
+@tool(
+    "quark_resolve",
+    "解析夸克网盘分享链接(pan.quark.cn/s/xxx,可带密码),列出分享内全部文件"
+    "(含子目录,给出名称/大小/目录路径)。用于找到的候选是夸克网盘链接时,"
+    "先看清单确认里面有用户要的资源,再决定下载。匿名可用,不需要 Cookie。",
+    parameters={
+        "type": "object",
+        "properties": {
+            "share_url": {"type": "string", "description": "夸克分享链接,如 https://pan.quark.cn/s/xxxx"},
+            "password": {"type": "string", "description": "提取码(链接里已带 ?pwd= 时可省略)"},
+            "max_depth": {"type": "integer", "description": "递归子目录深度,默认 3"},
+        },
+        "required": ["share_url"],
+    },
+    category="search",
+    timeout_ms=90_000,
+)
+def _quark_resolve_tool(share_url: str, password: str = "", max_depth: int = 3,
+                        ctx=None) -> ToolResult:
+    from skills.quark import list_share
+
+    try:
+        r = list_share(share_url, password=password, max_depth=max_depth)
+    except Exception as e:
+        return ToolResult.failure(f"夸克解析失败: {type(e).__name__}: {str(e)[:140]}")
+    files = [f for f in r["files"] if not f.get("dir")]
+    lines = [f"分享 {r['pwd_id']} 内文件 {len(files)} 个:"]
+    for f in sorted(files, key=lambda x: -(x.get("size") or 0))[:30]:
+        sz = f.get("size") or 0
+        lines.append(f"  {f.get('path', '')} ({_fmt_bytes(sz)})")
+    return ToolResult.success("\n".join(lines), data=r)
+
+
+@tool(
+    "quark_download",
+    "从夸克网盘分享链接自动下载目标文件:解析 → 按意图/文件名过滤选文件 → 转存 → 换直链 → 下载落地。"
+    "用于候选是 pan.quark.cn 分享链接且 quark_resolve 已确认里面有目标资源时。"
+    "file_filter 可指定文件名关键词(如 '投影');缺省按意图的格式偏好(首选扩展名>兜底>最大文件)选。"
+    "需要已导入夸克 Cookie(一次性,之后全自动;未配置会明确报错)。",
+    parameters={
+        "type": "object",
+        "properties": {
+            "share_url": {"type": "string", "description": "夸克分享链接"},
+            "password": {"type": "string", "description": "提取码(链接已带 ?pwd= 时可省略)"},
+            "file_filter": {"type": "string", "description": "文件名关键词过滤(可选)"},
+            "dest_dir": {"type": "string", "description": "输出目录,默认 downloads/"},
+        },
+        "required": ["share_url"],
+    },
+    category="execute",
+    timeout_ms=600_000,
+    concurrency_safe=False,
+)
+def _quark_download_tool(share_url: str, password: str = "", file_filter: str = "",
+                         dest_dir: str = "downloads", ctx=None) -> ToolResult:
+    from skills.quark import download_share
+
+    dest_dir = _task_out_dir(ctx, dest_dir or "downloads")
+    preferred = accept = ()
+    if ctx and ctx.state and ctx.state.intent:
+        preferred = tuple(ctx.state.intent.preferred_exts or ())
+        accept = tuple(ctx.state.intent.accept_exts or ())
+    try:
+        r = download_share(share_url, password=password, file_filter=file_filter,
+                           dest_dir=dest_dir, preferred_exts=preferred,
+                           accept_exts=accept)
+    except Exception as e:
+        return ToolResult.failure(f"夸克下载失败: {type(e).__name__}: {str(e)[:160]}")
+    return ToolResult.success(
+        f"夸克下载成功: {r['file_name']} ({r['size']} 字节) -> {r['path']}",
+        data={"path": r["path"], "file_name": r["file_name"], "size": r["size"]},
+    )
+
+
+def _fmt_bytes(n: int) -> str:
+    n = int(n or 0)
+    for unit in ("B", "KB", "MB", "GB", "TB"):
+        if n < 1024 or unit == "TB":
+            return f"{n:.0f} {unit}" if unit == "B" else f"{n:.1f} {unit}"
+        n /= 1024.0
+    return f"{n:.1f} TB"
+
+
 # ---------------------------------------------------------------- 一键粗扫
 
 @tool(
@@ -362,7 +462,7 @@ def _inspect_archive_tool(path: str, ctx=None) -> ToolResult:
         "properties": {
             "query": {"type": "string", "description": "检索词"},
             "out_dir": {"type": "string", "description": "下载目录,默认 downloads/"},
-            "max_candidates": {"type": "integer", "description": "分析候选上限,默认 6"},
+            "max_candidates": {"type": "integer", "description": "分析候选上限,默认 16"},
         },
         "required": ["query"],
     },
@@ -371,9 +471,10 @@ def _inspect_archive_tool(path: str, ctx=None) -> ToolResult:
     concurrency_safe=False,
 )
 def _batch_research_tool(query: str, out_dir: str = "downloads",
-                         max_candidates: int = 6, ctx=None) -> ToolResult:
+                         max_candidates: int = 16, ctx=None) -> ToolResult:
     from agent.tasks.fetch_resource import fetch_resource
 
+    out_dir = _task_out_dir(ctx, out_dir or "downloads")
     result = fetch_resource(query=query, file_types=None, out_dir=out_dir,
                             max_candidates=max_candidates,
                             use_agent_fallback=False, verbose=False)
@@ -387,6 +488,39 @@ def _batch_research_tool(query: str, out_dir: str = "downloads",
         "可改用 search/analyze_page/download 细粒度处理。",
         data={"error": result.error},
     )
+
+
+@tool(
+    "fetch_novel_txt",
+    "小说章节拼接:给定书籍页面 URL(笔趣阁等逐章站),自动爬取章节目录、逐章抓取正文,"
+    "合并为单体 txt 文件。解决小说站只有分章 HTML、没有全本 txt 下载的问题。"
+    "返回落地文件路径与章节数;失败返回原因(未发现目录/正文提取失败等)。",
+    parameters={
+        "type": "object",
+        "properties": {
+            "book_url": {"type": "string", "description": "书籍页面 URL(含章节目录)"},
+            "out_dir": {"type": "string", "description": "输出目录,默认 downloads/"},
+            "max_chapters": {"type": "integer", "description": "最多抓取章节数,默认 1500"},
+        },
+        "required": ["book_url"],
+    },
+    category="execute",
+    timeout_ms=900_000,
+    concurrency_safe=False,
+)
+def _fetch_novel_tool(book_url: str, out_dir: str = "downloads",
+                      max_chapters: int = 1500, ctx=None) -> ToolResult:
+    from skills.novel import fetch_novel_txt
+
+    out_dir = _task_out_dir(ctx, out_dir or "downloads")
+    r = fetch_novel_txt(book_url, out_dir=out_dir, max_chapters=max_chapters)
+    if r.get("ok"):
+        note = f"({r['chapters']}/{r['total']} 章)" + (f" - {r['note']}" if r.get("note") else "")
+        return ToolResult.success(f"小说拼接完成: {r['path']} {note}",
+                                  data={"path": r["path"], "chapters": r["chapters"],
+                                        "total": r["total"], "title": r.get("title", "")})
+    return ToolResult.failure(f"小说拼接失败: {r.get('error') or '未知原因'}",
+                              data={"error": r.get("error")})
 
 
 def registered_names() -> list[str]:

@@ -1,0 +1,7 @@
+{
+  "name": "quark",
+  "version": "0.1.0",
+  "description": "夸克网盘自动解析:分享链接→清单→转存→直链下载(一次导 Cookie,不再扫码)",
+  "tools": ["quark_resolve", "quark_download"],
+  "requires": []
+}

@@ -34,17 +34,26 @@ import numpy as np
 
 try:
     import ddddocr
-except ImportError as exc:  # pragma: no cover
-    raise ImportError(
-        "skills/captcha 需要 ddddocr: pip install ddddocr "
-        "(本机可用 resource-hub-research/venv-demo 的 Python)"
-    ) from exc
 
-if not (hasattr(ddddocr.DdddOcr, "classification") and hasattr(ddddocr.DdddOcr, "set_ranges")):
-    raise ImportError(
-        "ddddocr 版本过旧(缺少 classification/set_ranges API)。"
-        "请升级: pip install -U ddddocr,或改用 resource-hub-research/venv-demo 的 Python。"
-    )
+    _DDDDOCR_OK = hasattr(ddddocr.DdddOcr, "classification") and \
+        hasattr(ddddocr.DdddOcr, "set_ranges")
+except ImportError:  # pragma: no cover
+    ddddocr = None  # type: ignore[assignment]
+    _DDDDOCR_OK = False
+
+
+def require_ddddocr() -> None:
+    """惰性校验:OCR 调用时才检查依赖(未装/版本旧 → 明确报错,不阻断 import)。"""
+    if ddddocr is None:
+        raise ImportError(
+            "skills/captcha 需要 ddddocr: pip install ddddocr "
+            "(本机可用 resource-hub-research/venv-demo 的 Python)"
+        )
+    if not _DDDDOCR_OK:
+        raise ImportError(
+            "ddddocr 版本过旧(缺少 classification/set_ranges API)。"
+            "请升级: pip install -U ddddocr,或改用 resource-hub-research/venv-demo 的 Python。"
+        )
 
 from .preprocess import (
     binarize_adaptive,
@@ -117,6 +126,7 @@ class CaptchaSolver:
         use_detection: bool = True,
         use_beta: bool = True,
     ) -> None:
+        require_ddddocr()  # 惰性校验:OCR 实例化时才检查依赖
         self._ocr = ddddocr.DdddOcr(show_ad=show_ad)
         self._det = ddddocr.DdddOcr(show_ad=show_ad, det=True) if use_detection else None
         self._beta = ddddocr.DdddOcr(show_ad=show_ad, beta=True) if use_beta else None
