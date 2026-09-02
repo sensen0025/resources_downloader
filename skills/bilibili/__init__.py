@@ -305,8 +305,12 @@ def bilibili_download_media(url: str, dest_dir: str | Path, *,
         apath, _ = download_audio(astream, dest, cookies=cookies)
         if apath:
             # 合并输出必须与输入视频流不同名(download_video 已把 .m4s 存为 .mp4,
-            # 同名输出会让 ffmpeg "输出=输入" 直接失败 —— 线上事故)
-            out = dest / f"{Path(vpath).stem}_merged.mp4"
+            # 同名输出会让 ffmpeg "输出=输入" 直接失败 —— 线上事故);
+            # 指定 filename 时(列表条目 序号_标题)用它命名合并产物
+            if filename:
+                out = dest / (filename if filename.lower().endswith(".mp4") else f"{filename}.mp4")
+            else:
+                out = dest / f"{Path(vpath).stem}_merged.mp4"
             ok, msg = merge_av_ffmpeg(Path(vpath), Path(apath), out)
             if ok:
                 for p in (Path(vpath), Path(apath)):
@@ -317,9 +321,25 @@ def bilibili_download_media(url: str, dest_dir: str | Path, *,
                 return {"ok": True, "path": msg, "size": out.stat().st_size,
                         "codecs": vstream.get("codecs", ""), "mode": "video", "merged": True}
             # 合并失败:保留视频流并报告
+            if filename:
+                vp = Path(vpath)
+                vp2 = dest / (filename if filename.lower().endswith(".mp4") else f"{filename}.mp4")
+                try:
+                    vp.rename(vp2)
+                    vpath = vp2
+                except OSError:
+                    pass
             return {"ok": True, "path": str(vpath), "size": vsize,
                     "codecs": vstream.get("codecs", ""), "mode": "video",
                     "note": f"音视频合并失败({msg[:60]}),已保留视频流"}
+    if filename:
+        vp = Path(vpath)
+        vp2 = dest / (filename if filename.lower().endswith(".mp4") else f"{filename}.mp4")
+        try:
+            vp.rename(vp2)
+            vpath = vp2
+        except OSError:
+            pass
     return {"ok": True, "path": str(vpath), "size": vsize,
             "codecs": vstream.get("codecs", ""), "mode": "video", "note": "无音频轨"}
 

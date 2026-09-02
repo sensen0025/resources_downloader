@@ -90,7 +90,7 @@ class TestAgentFetchForwardsProgress(unittest.TestCase):
 
         class _FakeAgent:
             def __init__(self, session, llm, goal, allowed_domain="", max_steps=30,
-                         verbose=True, progress=None):
+                         max_seconds=None, verbose=True, progress=None):
                 from types import SimpleNamespace
 
                 self.progress = progress
@@ -127,7 +127,8 @@ class TestAgentFetchForwardsProgress(unittest.TestCase):
                 ok = fr._agent_fetch("https://x.com/login", (".txt",), Path(td),
                                      verbose=False,
                                      on_stage=lambda s, m: events.append((s, m)))
-        self.assertFalse(ok)
+        # _agent_fetch 返回 AgentResult(含 success/final_title),失败时 success=False
+        self.assertFalse(ok.success)
         self.assertEqual([s for s, _ in events], ["agent", "agent", "agent"])
         # _agent_fetch 把任务目录注入 ctx.task → 工具的落盘目录被强制到任务目录
         self.assertTrue(any("任务目录=" in m and str(Path(td).resolve()) in m
@@ -154,9 +155,9 @@ class TestToolTaskOutDir(unittest.TestCase):
 
         calls: list = []
 
-        def fake_download(url, dest, expected_ext="", min_size=0, referer=""):
+        def fake_download(url, dest, expected_ext="", min_size=0, referer="", filename=None):
             calls.append((url, dest))
-            return SimpleNamespace(ok=True, path=str(Path(dest) / "a.txt"),
+            return SimpleNamespace(ok=True, path=str(Path(dest) / (filename or "a.txt")),
                                    size=1, resumed=False, error="")
 
         ctx = SimpleNamespace(session=None, task=SimpleNamespace(out_dir="/tmp/rh_task_xyz"))
@@ -171,9 +172,9 @@ class TestToolTaskOutDir(unittest.TestCase):
 
         calls: list = []
 
-        def fake_download(url, dest, expected_ext="", min_size=0, referer=""):
+        def fake_download(url, dest, expected_ext="", min_size=0, referer="", filename=None):
             calls.append((url, dest))
-            return SimpleNamespace(ok=True, path=str(Path(dest) / "a.txt"),
+            return SimpleNamespace(ok=True, path=str(Path(dest) / (filename or "a.txt")),
                                    size=1, resumed=False, error="")
 
         # 无 ctx / 无 task → 保持默认 downloads/(独立脚本/注册流程)

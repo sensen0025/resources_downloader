@@ -171,5 +171,73 @@ class TestSkinNameMatchAndLittleskin(unittest.TestCase):
         self.assertTrue(any("810649" in r.url for r in raws), [r.url for r in raws])
 
 
+class TestListIntent(unittest.TestCase):
+    """列表意图检测:合集/全集/歌单/第N个 等触发列表模式(预算放大 + goal 列表指令)。"""
+
+    def _is_list(self, q, fts):
+        from agent.tasks.fetch_resource import _is_list_intent
+
+        return _is_list_intent(q, fts)
+
+    def test_hits(self):
+        vid = (".mp4", ".mkv")
+        aud = (".mp3", ".flac")
+        self.assertTrue(self._is_list("凡人修仙传 动漫 合集", vid))
+        self.assertTrue(self._is_list("xxx 合集 第4集", vid))
+        self.assertTrue(self._is_list("xxx 第4个", vid))
+        self.assertTrue(self._is_list("轻音乐 歌单", aud))
+        self.assertTrue(self._is_list("收藏夹 全部", vid))
+
+    def test_episode_selection_is_list_aware(self):
+        # 第X集 也应触发列表意识:Agent 在剧集页要选对集数而非抓第一个
+        self.assertTrue(self._is_list("凡人修仙传 第10集 在线观看", (".mp4", ".mkv")))
+
+    def test_misses(self):
+        self.assertFalse(self._is_list("某书 合集", (".txt", ".pdf")))   # 非音视频
+        self.assertFalse(self._is_list("壁纸 合集", (".jpg", ".png")))   # 非音视频
+        self.assertFalse(self._is_list("凡人修仙传 壁纸 4k", (".jpg", ".png")))
+        self.assertFalse(self._is_list("", (".mp4",)))
+
+    def test_agent_fetch_list_budget_and_goal(self):
+        """列表意图 → max_steps=120 / max_seconds=900 / goal 含列表指令。"""
+        from unittest import mock
+
+        import importlib
+
+        # agent/tasks/__init__.py 把 fetch_resource 属性重绑成了函数,必须 import_module 拿真实模块
+        fr = importlib.import_module("agent.tasks.fetch_resource")
+
+        calls: dict = {}
+
+        class FakeSession:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+            def goto(self, *a, **k):
+                pass
+
+        class FakeAgent:
+            def __init__(self, **kw):
+                calls.update(kw)
+
+            def run(self):
+                return SimpleNamespace(success=True, final_title="")
+
+        with mock.patch("agent.browser.BrowserSession", return_value=FakeSession()), \
+             mock.patch("agent.AccountAgent", FakeAgent), \
+             mock.patch("agent.llm.LLMClient"), \
+             mock.patch("agent.cookies.find_cookies", return_value=None), \
+             mock.patch("agent.cookies.has_cookies", return_value=False):
+            fr._agent_fetch("https://bilibili.com/video/BV1", (".mp4",),
+                            Path("_tmp_out"), query="xxx 合集 全部")
+        self.assertEqual(calls["max_steps"], 120)
+        self.assertEqual(calls["max_seconds"], 900.0)
+        self.assertIn("列表", calls["goal"])
+        self.assertIn("已下载 X/N", calls["goal"])
+
+
 if __name__ == "__main__":
     unittest.main()

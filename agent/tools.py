@@ -293,6 +293,7 @@ def _task_out_dir(ctx, default: str) -> str:
         "properties": {
             "url": {"type": "string", "description": "文件直链 / m3u8 流 / 播放页"},
             "dest_dir": {"type": "string", "description": "保存目录,默认 downloads/"},
+            "filename": {"type": "string", "description": "输出文件名(可选;列表条目用 序号_标题 便于区分)"},
             "expected_ext": {"type": "string", "description": "期望扩展名,如 .litematic / .schematic / .zip"},
             "min_size": {"type": "integer", "description": "最小字节数(防空文件),默认 0"},
             "use_session": {"type": "boolean", "description": "是否走浏览器会话下载(默认 false;普通 HTTP 403 时改 true)"},
@@ -303,7 +304,7 @@ def _task_out_dir(ctx, default: str) -> str:
     timeout_ms=3_600_000,
     concurrency_safe=False,
 )
-def _download_tool(url: str, dest_dir: str = "downloads",
+def _download_tool(url: str, dest_dir: str = "downloads", filename: str = "",
                    expected_ext: str = "", min_size: int = 0,
                    use_session: bool = False, ctx=None) -> ToolResult:
     # 任务上下文强制落到任务目录(否则交付层收不到文件,网页无下载按钮)
@@ -312,10 +313,11 @@ def _download_tool(url: str, dest_dir: str = "downloads",
     if url and "bilibili.com" in url.lower():
         from skills.bilibili import bilibili_download
 
-        r = bilibili_download(url, dest_dir, session=(ctx.session if ctx else None))
+        r = bilibili_download(url, dest_dir, session=(ctx.session if ctx else None),
+                              filename=filename)
         if r.get("ok"):
             return ToolResult.success(
-                f"B站音频下载成功: {r['path']} ({r['size']} 字节, codecs={r.get('codecs','')})",
+                f"B站视频下载成功: {r['path']} ({r['size']} 字节, codecs={r.get('codecs','')})",
                 data=r,
             )
         return ToolResult.failure(f"B站下载失败: {r.get('error','')}(需浏览器会话/页面有登录限制)")
@@ -325,7 +327,7 @@ def _download_tool(url: str, dest_dir: str = "downloads",
         from skills.universal import universal_download
 
         referer = ctx.session.current_url() if (ctx and ctx.session) else ""
-        r = universal_download(url, dest_dir, filename="",
+        r = universal_download(url, dest_dir, filename=filename,
                                referer=referer, use_browser=use_session)
         if r.ok:
             return ToolResult.success(
@@ -334,14 +336,15 @@ def _download_tool(url: str, dest_dir: str = "downloads",
             )
         return ToolResult.failure(f"流式下载失败: {r.error}")
     if use_session and ctx and ctx.session and ctx.session.context is not None:
-        return _download_via_session(ctx.session, url, dest_dir, expected_ext, min_size)
+        return _download_via_session(ctx.session, url, dest_dir, expected_ext, min_size,
+                                     filename=filename)
     from delivery import download
 
     dest = Path(dest_dir)
     # 防盗链:传当前页面 URL 作 Referer(图站常见)
     referer = ctx.session.current_url() if (ctx and ctx.session) else ""
     result = download(url, dest, expected_ext=expected_ext, min_size=min_size,
-                      referer=referer)
+                      referer=referer, filename=filename)
     if result.ok:
         return ToolResult.success(
             f"下载成功: {result.path} ({result.size} 字节, 续传={result.resumed})",
@@ -351,13 +354,21 @@ def _download_tool(url: str, dest_dir: str = "downloads",
 
 
 def _download_via_session(session, url: str, dest_dir: str, expected_ext: str,
-                          min_size: int) -> ToolResult:
+                          min_size: int, filename: str = "") -> ToolResult:
     """走浏览器会话下载:先试 context.request,失败(403/CF)用浏览器下载事件。"""
     import time
     from pathlib import Path as _P
 
     dest = _P(dest_dir)
     dest.mkdir(parents=True, exist_ok=True)
+
+    def _final_name(guess: str) -> str:
+        if filename:
+            return filename
+        if expected_ext and not guess.lower().endswith(expected_ext.lower()):
+            return f"{_P(guess).stem}{expected_ext}"
+        return guess
+
     # 1) context.request(共享 Cookie,普通情况够用)
     try:
         resp = session.context.request.get(url, timeout=60_000)
@@ -365,9 +376,7 @@ def _download_via_session(session, url: str, dest_dir: str, expected_ext: str,
             body = resp.body()
             if min_size and len(body) < min_size:
                 return ToolResult.failure(f"文件过小: {len(body)}B < {min_size}B")
-            name = _P(url.split("?")[0]).name or f"download_{int(time.time())}.bin"
-            if expected_ext and not name.lower().endswith(expected_ext.lower()):
-                name = f"{_P(name).stem}{expected_ext}"
+            name = _final_name(_P(url.split("?")[0]).name or f"download_{int(time.time())}.bin")
             path = dest / name
             path.write_bytes(body)
             return ToolResult.success(
@@ -382,9 +391,7 @@ def _download_via_session(session, url: str, dest_dir: str, expected_ext: str,
         with page.expect_download(timeout=60_000) as dl_info:
             page.goto(url, wait_until="domcontentloaded", timeout=45_000)
         dl = dl_info.value
-        name = dl.suggested_filename or _P(url.split("?")[0]).name or f"download_{int(time.time())}.bin"
-        if expected_ext and not name.lower().endswith(expected_ext.lower()):
-            name = f"{_P(name).stem}{expected_ext}"
+        name = _final_name(dl.suggested_filename or _P(url.split("?")[0]).name or f"download_{int(time.time())}.bin")
         path = dest / name
         dl.save_as(str(path))
         if min_size and path.stat().st_size < min_size:

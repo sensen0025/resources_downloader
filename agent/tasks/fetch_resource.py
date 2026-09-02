@@ -38,6 +38,7 @@ class TaskTimeout(Exception):
 
 
 _TASK_TIME_BUDGET = 600.0   # 整条管线硬上限(秒):超过直接失败,不给用户"无限等待"的观感
+_LIST_TASK_TIME_BUDGET = 1800.0   # 列表意图(合集/全集/歌单等,多条抓取)的放宽上限
 
 
 def _emit(on_stage: Optional[Callable[[str, str], None]], stage: str, msg: str) -> None:
@@ -420,14 +421,17 @@ def _pipeline(
     """
     if site_log is None:
         site_log = []
+    file_types = _infer_file_types(query, file_types)
     # 整条管线时间硬上限:包一层 deadline 感知的取消回调 —— 所有 _check_cancel 点
     # 自动检查总预算,超时抛 TaskTimeout,由 fetch_resource 包装层转为失败结果。
-    _deadline = time.monotonic() + _TASK_TIME_BUDGET
+    # 列表意图(合集/全集/歌单等)要多条抓取,预算放大;普通任务保持 600s。
+    _budget = _LIST_TASK_TIME_BUDGET if _is_list_intent(query, file_types) else _TASK_TIME_BUDGET
+    _deadline = time.monotonic() + _budget
     _orig_cancel = is_cancelled
 
     def _deadline_aware_cancel() -> bool:
         if time.monotonic() > _deadline:
-            raise TaskTimeout(f"任务超过总时间预算 {_TASK_TIME_BUDGET:.0f}s")
+            raise TaskTimeout(f"任务超过总时间预算 {_budget:.0f}s")
         if _orig_cancel is not None:
             try:
                 return bool(_orig_cancel())
@@ -436,7 +440,6 @@ def _pipeline(
         return False
 
     is_cancelled = _deadline_aware_cancel
-    file_types = _infer_file_types(query, file_types)
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     probe = FileProbe(out_dir, file_types)
@@ -907,6 +910,40 @@ def _pipeline(
                 print(f"\n🤖 浏览器 Agent 处理: {url[:90]} ({reason})")
             _emit(on_stage, "agent",
                   f"🤖 第 {tried}/{_MAX_AGENT_ATTEMPTS} 次 Agent 尝试: {url[:80]} ({reason})")
+            # 列表意图:候选是列表页/合集/多P 时先走「枚举→逐条抓取」,命中即完成
+            if (_is_list_intent(query, file_types)
+                    and (_looks_like_list_url(url) or "bilibili.com/video" in url
+                         or "列表" in reason or "索引" in reason)):
+                list_files = _list_fetch_candidate(url, file_types, out_dir, query,
+                                                   login_email, username, verbose,
+                                                   reuse_cookies, is_cancelled, on_stage)
+                if list_files:
+                    kept = []
+                    for f in list_files:
+                        if security_scan:
+                            verdict, note = _security_gate(f)
+                            if verdict in ("infected", "suspicious"):
+                                if verbose:
+                                    print(f"🛡️  列表文件未过安全扫描({verdict}): {Path(f).name}")
+                                continue
+                        if _is_image_types(file_types):
+                            verdict, detail = _verify_image_file(f, query, file_types)
+                            if verdict is False:
+                                continue
+                        kept.append(f)
+                    result.files = kept
+                    if kept:
+                        result.sources.append(url)
+                        result.pan_links = list(dict.fromkeys(pan_links))
+                        result.success = True
+                        result.summary = f"列表抓取完成: {len(kept)} 个文件"
+                        _emit(on_stage, "agent", f"✅ 列表抓取完成: {len(kept)} 个文件")
+                        return result
+                    _emit(on_stage, "agent", f"列表文件未通过校验,继续下一候选")
+                else:
+                    _emit(on_stage, "agent", f"列表模式未获文件,继续下一候选")
+                _log_site(site_log, url, query, agent_ok=False, note="列表模式")
+                continue
             ares = _agent_fetch(url, file_types, out_dir, login_email, username,
                                 verbose, reuse_cookies, is_cancelled, on_stage=on_stage,
                                 query=query)
@@ -1195,6 +1232,35 @@ def _is_media_intent(query: str, file_types) -> bool:
     return any(e in ft for e in media) and len(ft) <= 12
 
 
+# 列表意图词:合集/全集/系列/歌单/播放列表/收藏夹/第N个/第X-Y集 等
+_LIST_WORDS = (
+    "合集", "全集", "系列", "全p", "全p集", "全集", "歌单", "播放列表",
+    "playlist", "收藏夹", "列表", "第几个", "第1个", "第2个", "第3个", "第4个",
+    "第5个", "第6个", "第7个", "第8个", "第9个", "第10个", "第11个", "第12个",
+    "第13个", "第14个", "第15个", "第16个", "第17个", "第18个", "第19个", "第20个",
+)
+
+# 第N集/第N话/P N(阿拉伯或中文数字)→ 列表选择意图
+_LIST_INDEX_RE = re.compile(
+    r"第\s*(?:[0-9]{1,3}|[一二三四五六七八九十百千两]{1,6})\s*(?:个|集|话|期|回|章|p|P)"
+    r"|P\s*[0-9]{1,3}\b",
+)
+
+
+def _is_list_intent(query: str, file_types) -> bool:
+    """列表意图:查询表达"抓多个/抓第N个"且目标类型是音视频。
+
+    命中 → 任务预算放大(1800s),且 Agent goal 注入列表规则提示。
+    """
+    q = (query or "").lower()
+    if not any(w in q for w in _LIST_WORDS) and not _LIST_INDEX_RE.search(q):
+        return False
+    ft = [f.lower() for f in (file_types or ())]
+    media = {".mp3", ".flac", ".wav", ".ogg", ".m4a", ".aac", ".opus",
+             ".mp4", ".mkv", ".webm", ".avi", ".mov", ".m3u8", ".ts"}
+    return any(e in ft for e in media) and len(ft) <= 12
+
+
 def _clean_media_query(query: str) -> str:
     """媒体查询去噪:B站搜索用干净词(「大爱炼天 歌曲下载」→「大爱炼天」)。"""
     q = _MEDIA_NOISE.sub(" ", query or "")
@@ -1311,6 +1377,237 @@ def _security_gate(path: str) -> tuple[str, str]:
     return r.verdict, r.summary
 
 
+# ================================================================ 列表模式(AI 枚举 + 逐条抓取)
+# 单靠提示词让 LLM 自循环不可靠(实测:Agent 看到分P却只下第一个就 done)。
+# 正确分工:AI 负责「理解列表 + 按意图选择条目」(枚举器短跑输出 JSON),
+# 管道负责「逐条确定性抓取 + 预算 + 交付」—— 第N个只下第N个,全部下全部。
+
+_AUDIO_EXTS = {".mp3", ".flac", ".wav", ".ogg", ".m4a", ".aac", ".opus"}
+
+
+def _is_audio_types(file_types) -> bool:
+    fts = {str(f).lower() for f in (file_types or ())}
+    return bool(fts) and fts <= _AUDIO_EXTS
+
+
+def _looks_like_list_url(url: str) -> bool:
+    low = (url or "").lower()
+    return any(k in low for k in (
+        "/list/", "/medialist/", "playlist", "collection", "/play/",
+        "fav/list", "bangumi/play", "/series", "合集",
+    ))
+
+
+_LIST_ENUM_GOAL = """你是列表枚举器。下面是从页面 {url} 提取到的链接(可能含分P/合集/播放列表条目)
+与页面文本。请按查询意图筛选出**可下载的媒体条目**,输出 JSON。
+
+规则:
+1. 只挑 视频/音频 类条目:分P视频(URL 带 ?p=N,如 .../video/BVxxx?p=4)、
+   合集/播放列表/收藏夹/剧集条目(指向视频/音频页的链接)。
+   忽略:登录/注册/导航/广告/图片/普通文章链接。
+2. 若页面是普通单视频页(链接里只有它自己)→ 把它作为唯一条目。
+3. 若链接里没有任何媒体条目 → items 为空数组 []。
+4. 按查询意图筛选:
+   - 查询含「第N个 / 第X集 / 第N话 / P N」→ 只保留对应序号的条目
+     (如「第4集」→ 只输出 ?p=4 那条);
+   - 查询含「全部 / 全集 / 合集」→ 保留全部条目(最多 20 个);
+   - 查询含标题关键词 → 保留标题匹配的条目。
+5. 条目 URL 必须是完整可访问地址;标题给条目名(如 "P4 标题")。
+
+只输出一个 JSON,不要其他文字:
+{{"items":[{{"title":"条目标题","url":"条目完整URL"}}]}}
+
+查询: {query}
+页面链接:
+{links}
+页面文本(节选):
+{text}"""
+
+_LIST_EXTRACT_JS = """() => {
+  const links = [];
+  const seen = new Set();
+  for (const a of document.querySelectorAll('a[href]')) {
+    const h = a.href || '';
+    if (!h || h.startsWith('javascript:') || h.startsWith('#')) continue;
+    if (seen.has(h)) continue;
+    seen.add(h);
+    const t = (a.innerText || a.getAttribute('title') || '').trim().replace(/\\s+/g, ' ').slice(0, 80);
+    if (t) links.push(t + ' -> ' + h);
+  }
+  const text = (document.body ? document.body.innerText : '').replace(/\\s+/g, ' ').slice(0, 3000);
+  return {links: links.slice(0, 400).join('\\n'), text};
+}"""
+
+
+def _enumerate_items(url: str, query: str, file_types, out_dir: Path,
+                     login_email: str, username: str, verbose: bool,
+                     reuse_cookies: bool, is_cancelled, on_stage) -> list[dict]:
+    """枚举器:浏览器渲染 DOM → 一次 LLM 调用筛选条目(快,~10-30s)。
+
+    完整 Agent 循环枚举太慢且不可靠(实测 35 步空转);直接提取链接+文本交给
+    LLM 判断「哪些是媒体条目 + 按查询选哪个」—— AI 仍负责全部理解/选择。
+    """
+    from agent.browser import BrowserSession
+    from agent.cookies import find_cookies, has_cookies
+    from agent.llm import LLMClient
+
+    ck = find_cookies("bilibili.com") if "bilibili.com" in url else None
+    ck_path = ck if (reuse_cookies and ck is not None and has_cookies(ck)) else None
+    try:
+        _check_cancel(is_cancelled)
+        with BrowserSession(headless=True, cookies_path=ck_path) as session:
+            session.goto(url)
+            try:
+                session.page.wait_for_timeout(3000)
+            except Exception:
+                pass
+            data = session.page.evaluate(_LIST_EXTRACT_JS) or {}
+        _check_cancel(is_cancelled)
+    except TaskCancelled:
+        raise
+    except Exception as e:
+        if verbose:
+            print(f"列表枚举异常: {type(e).__name__}: {str(e)[:150]}")
+        _emit(on_stage, "list", f"列表枚举异常: {type(e).__name__}")
+        return []
+    prompt = _LIST_ENUM_GOAL.format(url=url, query=(query or "")[:200],
+                                    links=(data.get("links") or "")[:6000],
+                                    text=(data.get("text") or "")[:2500])
+    # B站分P:官方 pagelist API 与页面同源,DOM 分P选择器渲染不稳定时兜底(如 10P 视频)
+    if "bilibili.com/video" in url:
+        m_bv = re.search(r"/video/(BV[0-9A-Za-z]+)", url)
+        if m_bv:
+            try:
+                import requests
+
+                from proxy import proxies
+
+                r = requests.get("https://api.bilibili.com/x/player/pagelist",
+                                 params={"bvid": m_bv.group(1)},
+                                 headers={"User-Agent": "Mozilla/5.0",
+                                          "Referer": "https://www.bilibili.com/"},
+                                 timeout=10, proxies=proxies())
+                pages = (r.json().get("data") or [])
+                if len(pages) > 1:
+                    extra = "\n".join(
+                        f"P{i + 1}: {str(p.get('part', ''))[:60]} -> "
+                        f"https://www.bilibili.com/video/{m_bv.group(1)}?p={i + 1}"
+                        for i, p in enumerate(pages[:20]))
+                    prompt = prompt.replace("页面链接:", "页面链接(分P以官方列表为准):\n" + extra + "\n")
+            except Exception:
+                pass
+    try:
+        reply = LLMClient().chat([{"role": "system", "content": prompt}],
+                                 temperature=0.2, max_tokens=1024)
+    except Exception as e:
+        if verbose:
+            print(f"枚举 LLM 失败: {type(e).__name__}: {str(e)[:120]}")
+        return []
+    items = _parse_items_json(reply)
+    if verbose:
+        print(f"📋 枚举到 {len(items)} 个条目: {[it['title'][:20] for it in items]}")
+    _emit(on_stage, "list", f"枚举 {len(items)} 个条目(按意图筛选)")
+    return items
+
+
+def _parse_items_json(text: str) -> list[dict]:
+    import json as _json
+
+    if not text:
+        return []
+    try:
+        d = _json.loads(text)
+    except Exception:
+        from agent.agent import _parse_decision
+
+        try:
+            d = _parse_decision(text)
+        except Exception:
+            return []
+    items = d.get("items") if isinstance(d, dict) else None
+    out = []
+    for it in (items or []):
+        if isinstance(it, dict) and it.get("url"):
+            out.append({"title": str(it.get("title", ""))[:120],
+                        "url": str(it["url"]).strip()})
+    # 去重(按 URL)
+    seen, uniq = set(), []
+    for it in out:
+        if it["url"] not in seen:
+            seen.add(it["url"])
+            uniq.append(it)
+    return uniq[:20]
+
+
+def _fetch_bilibili_direct(url: str, dest_dir: Path, filename: str,
+                           file_types, on_stage) -> Optional[str]:
+    """B站条目直抓:浏览器会话(带 cookie 过 412)→ bilibili_download_media。"""
+    from agent.browser import BrowserSession
+    from agent.cookies import find_cookies, has_cookies
+    from skills.bilibili import bilibili_download_media
+
+    ck = find_cookies("bilibili.com")
+    ck_path = ck if (ck is not None and has_cookies(ck)) else None
+    try:
+        with BrowserSession(headless=True, downloads_dir=dest_dir,
+                            cookies_path=ck_path) as session:
+            r = bilibili_download_media(url, dest_dir, session=session,
+                                        mode="audio" if _is_audio_types(file_types) else "video",
+                                        filename=filename)
+    except Exception as e:
+        _emit(on_stage, "list", f"B站条目直抓异常: {type(e).__name__}")
+        return None
+    if r.get("ok"):
+        return r["path"]
+    return None
+
+
+def _list_fetch_candidate(url: str, file_types, out_dir: Path, query: str,
+                          login_email: str, username: str, verbose: bool,
+                          reuse_cookies: bool, is_cancelled, on_stage) -> Optional[list[str]]:
+    """列表候选:枚举(Agent) → 逐条确定性抓取。返回落地文件列表;失败返回 None。"""
+    items = _enumerate_items(url, query, file_types, out_dir, login_email, username,
+                             verbose, reuse_cookies, is_cancelled, on_stage)
+    if not items:
+        _emit(on_stage, "list", "列表无可用条目")
+        return None
+    files: list[str] = []
+    total = len(items)
+    for i, it in enumerate(items, start=1):
+        _check_cancel(is_cancelled)
+        title = re.sub(r'[\\/:*?"<>|\s]+', "_", it["title"])[:40] or f"item{i}"
+        fname = f"{i:02d}_{title}"
+        _emit(on_stage, "list", f"[{i}/{total}] 下载中: {it['title'][:50]}")
+        if verbose:
+            print(f"📥 [{i}/{total}] {it['title'][:60]}")
+        try:
+            if "bilibili.com" in it["url"]:
+                path = _fetch_bilibili_direct(it["url"], out_dir, fname, file_types, on_stage)
+            else:
+                ares = _agent_fetch(it["url"], file_types, out_dir, login_email, username,
+                                    verbose, reuse_cookies, is_cancelled, on_stage,
+                                    query=it["title"] or query)
+                path = None
+                if ares is not None and ares.success:
+                    # 该条目 Agent 落地文件:取任务目录新增文件
+                    probe = FileProbe(out_dir, file_types)
+                    newf = probe.found_files()
+                    path = newf[-1] if newf else None
+        except TaskCancelled:
+            raise
+        except Exception as e:
+            path = None
+            if verbose:
+                print(f"  条目异常: {type(e).__name__}: {str(e)[:120]}")
+        if path and Path(path).exists():
+            files.append(str(path))
+        else:
+            _emit(on_stage, "list", f"[{i}/{total}] 失败: {it['title'][:40]}")
+    if not files:
+        return None
+    return files
+
+
 def _agent_fetch(url: str, file_types: tuple[str, ...], out_dir: Path,
                  login_email: str = "", username: str = "",
                  verbose: bool = True, reuse_cookies: bool = True,
@@ -1340,6 +1637,16 @@ def _agent_fetch(url: str, file_types: tuple[str, ...], out_dir: Path,
     ck_path = ck if (reuse_cookies and ck is not None and has_cookies(ck)) else None
 
     exts = " / ".join(file_types)
+    # 列表意图:goal 注入列表规则提示(SYSTEM_PROMPT 6.6 有完整规则,这里只点明)
+    list_hint = ""
+    if _is_list_intent(query, file_types):
+        list_hint = (
+            f"\n⚠️ 该候选可能是列表/合集页:若页面含多个条目(同源链接 ≥5 个带不同标题,"
+            f"或 URL/标题含 合集|playlist|medialist|收藏夹|P N),按列表规则处理 —— "
+            f"按查询意图选择条目(第N个/第X集→只抓那个;全部/全集/合集→逐个抓最多20个;"
+            f"标题关键词→抓匹配的),每条目 filename=序号_标题,全部处理完才 done,"
+            f"done 时报告「已下载 X/N 个匹配条目」;只抓第一个不算完成。"
+        )
     # 皮肤意图:AI 驱动补源 —— 给 Agent 提示皮肤站,由它决定去哪找(不写死 URL 规则)
     skin_hint = ""
     if _is_skin_intent(query, file_types):
@@ -1399,6 +1706,7 @@ def _agent_fetch(url: str, file_types: tuple[str, ...], out_dir: Path,
         f"(浏览器会自动捕获下载文件到 {out_dir});若拿到直链 URL,用 download 工具下载;"
         f"4) 文件落地(大小>0)才算完成,直接 done(success=true)。\n"
         f"若需要人工介入(验证码过不去/需要付费),用 human 工具请求。"
+        f"{list_hint}"
         f"{skin_hint}"
         f"{account_hint}"
     )
@@ -1410,9 +1718,11 @@ def _agent_fetch(url: str, file_types: tuple[str, ...], out_dir: Path,
             def _agent_progress(line: str) -> None:
                 _emit(on_stage, "agent", _progress_line(line))
 
+            is_list = _is_list_intent(query, file_types)
             agent = AccountAgent(session=session, llm=LLMClient(), goal=goal,
-                                 allowed_domain="", max_steps=60,
-                                 max_seconds=300.0,   # 每候选时间预算(防单候选卡死)
+                                 allowed_domain="",
+                                 max_steps=120 if is_list else 60,   # 列表任务要多条抓取
+                                 max_seconds=900.0 if is_list else 300.0,  # 单候选时间预算
                                  progress=_agent_progress)
             # 注入任务输出目录 + 文件类型:Agent 的 download/流式/拼接等工具默认落到 downloads/,
             # 必须强制到任务目录 —— 否则交付层收不到文件,网页 done 却没有下载按钮;
