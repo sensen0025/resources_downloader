@@ -61,13 +61,21 @@ python rh_bridge.py cancel  <task_id>
 4. DSH 风格 agent（独立 subagent，仅凭 rh_bridge 用法说明）自主完成同一任务
    → 结果见 subagent 报告（成功/失败均记录）。
 
-## 下一步（P1 插件固化，待 P0 报告评审后启动）
+## 下一步（P2 等，见下）
 
-- 摸清 DSH cordis 插件注册 **agent 工具** 的机制（dsh-worktable 是 client/UI
-  插件 + webServer 路由；agent 工具 service 需单独确认；若当前版本不支持
-  第三方 agent 工具，退回 skill/提示词封装形态）。
-- 插件工程 resource-hub-dsh-plugin：注册 `resource_fetch(query, seed_urls?,
-  file_types?)` / `resource_status(task_id)` / `resource_cancel(task_id)`。
-- 注册：`dsh plugin --profile web add "link:<repo>/01_content"`，重启 dsh web。
-- 验收：DSH 会话内用工具完成列表类任务（第N集/全部），确认意图由 DSH 表达、
-  Python 列表管线确定性执行。
+- **P1 已完成（2026-09-02）**：resource-hub-dsh-plugin（独立仓库
+  `C:\Users\sense\Desktop\1\resource-hub-dsh-plugin`，commit 1da7a4b）。
+  - cordis 插件 + `dsh-tools.defineTool`，零运行时依赖（Node 内置 fetch）。
+  - 工具：`resource_fetch`（wait=true 阻塞 / wait=false 提交）、`resource_status`、
+    `resource_cancel`；`ctx.systemPrompt.section` 注入用法提示。
+  - 注册：`dsh plugin --profile headless add "link:.../01_content"`（web 同理）。
+  - 实测（headless profile，真实下载闭环）：
+    ① 阻塞模式皮肤下载 done；② wait=false + resource_status 轮询 done
+    （期间修复 resource_status schema 漏声明 sources/pan_links 的 bug）；
+    ③ 批量两个皮肤任务均 done。
+  - 注意：`ctx.setInterval` 需 inject `timer`（cordis-plugin-timer），已移除自检。
+- **P2 DOM 净化器**：独立低风险，见主计划（agent/dom_purify.py + 感知/枚举器接入）。
+- **web profile 注册**：`dsh plugin --profile web add "link:.../01_content"` +
+  重启 dsh web（会短暂中断 GUI 会话）——待用户确认后执行。
+- **服务器部署**：Node ≥20 + `npm i -g @deepseek-ai/dsh` + profile + 端口映射；
+  baseUrl 指到服务器 API。
