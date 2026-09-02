@@ -471,5 +471,39 @@ class TestMediaGuard(unittest.TestCase):
             self.assertTrue(any("跳过" in e for _, e in events))
 
 
+class TestReachability(unittest.TestCase):
+    """站点可达性预检:连接层失败才算不可达,HTTP 错误(403/412/5xx)算可达。
+
+    线上事故:『凡人修仙传 第10集』候选 v0-frontend-project-implementation-phi.
+    vercel.app 连不通,浏览器 Agent 在 chrome-error 页重试 900s 吃光兜底预算。
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        import importlib
+
+        cls.fr = importlib.import_module("agent.tasks.fetch_resource")
+
+    def test_connection_error_unreachable(self):
+        import requests as _requests
+
+        with mock.patch("requests.get",
+                        side_effect=_requests.exceptions.ConnectTimeout()):
+            self.assertFalse(self.fr._is_reachable("https://dead.example.com/video"))
+
+    def test_http_error_still_reachable(self):
+        # 403(反爬)/412(B站 WAF)/500:服务器可达,浏览器 Agent 可能能过 → 不算不可达
+        for status in (403, 412, 500, 404):
+            r = mock.MagicMock()
+            r.status_code = status
+            with mock.patch("requests.get", return_value=r):
+                self.assertTrue(self.fr._is_reachable("https://x.example.com/page"),
+                                f"HTTP {status} 应视为可达")
+
+    def test_bad_url_unreachable(self):
+        self.assertFalse(self.fr._is_reachable(""))
+        self.assertFalse(self.fr._is_reachable("not-a-url"))
+
+
 if __name__ == "__main__":
     unittest.main()

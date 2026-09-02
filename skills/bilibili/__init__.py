@@ -127,9 +127,36 @@ def extract_playinfo(page) -> dict:
     return {}
 
 
+def _dash_of(playinfo: dict) -> dict:
+    """DASH 流根:普通视频页 playinfo 在 data.dash,番剧(bangumi)页在 result.dash。
+
+    线上事故:『凡人修仙传 第10集』→ bilibili.com/bangumi/play/ep733325 的
+    __playinfo__ 是 pgc API 结构(根键 result),旧代码只认 data → 音视频流全空,
+    第10集瞬间失败。两个根都认,谁有流用谁。
+    """
+    if not isinstance(playinfo, dict):
+        return {}
+    for root in ("data", "result"):
+        d = playinfo.get(root)
+        if isinstance(d, dict) and isinstance(d.get("dash"), dict) and d["dash"]:
+            return d["dash"]
+    return {}
+
+
+def _play_root(playinfo: dict) -> dict:
+    """playinfo 的 data/result 根(取非空者),用于 is_preview 等元信息。"""
+    if not isinstance(playinfo, dict):
+        return {}
+    for root in ("data", "result"):
+        d = playinfo.get(root)
+        if isinstance(d, dict) and d:
+            return d
+    return {}
+
+
 def best_audio_stream(playinfo: dict) -> Optional[dict]:
-    """DASH 音频流按码率降序取最佳(DASH 结构:data.dash.audio[])。"""
-    dash = (playinfo.get("data") or {}).get("dash") or {}
+    """DASH 音频流按码率降序取最佳(DASH 结构:data/result.dash.audio[])。"""
+    dash = _dash_of(playinfo)
     audio = list(dash.get("audio") or [])
     if not audio:
         return None
@@ -138,7 +165,7 @@ def best_audio_stream(playinfo: dict) -> Optional[dict]:
 
 
 def best_video_stream(playinfo: dict) -> Optional[dict]:
-    dash = (playinfo.get("data") or {}).get("dash") or {}
+    dash = _dash_of(playinfo)
     video = list(dash.get("video") or [])
     if not video:
         return None
@@ -267,6 +294,11 @@ def bilibili_download_media(url: str, dest_dir: str | Path, *,
     if not playinfo:
         return {"ok": False, "error": "页面未找到 playinfo(B站可能要求登录/分区限制/页面布局变更)"}
 
+    # 番剧大会员锁定集的试看标记:pgc 结构在 result.is_preview(1=大会员试看,非完整正片)
+    _root = _play_root(playinfo)
+    _preview = bool(_root.get("is_preview")) if _root else False
+    _preview_note = "该集为大会员试看版(可能非完整正片)" if _preview else ""
+
     cookies = None
     try:
         if session.context is not None:
@@ -282,7 +314,8 @@ def bilibili_download_media(url: str, dest_dir: str | Path, *,
         if not path:
             return {"ok": False, "error": "音频流下载失败(CDN 拒绝,可稍后重试)"}
         return {"ok": True, "path": str(path), "size": size,
-                "codecs": stream.get("codecs", ""), "mode": "audio"}
+                "codecs": stream.get("codecs", ""), "mode": "audio",
+                "note": _preview_note or ""}
 
     # video / auto:视频流 + 音频流合并
     vstream = best_video_stream(playinfo)
@@ -290,13 +323,14 @@ def bilibili_download_media(url: str, dest_dir: str | Path, *,
         # 纯音频稿件(无视频轨)→ 降级音频
         astream = best_audio_stream(playinfo)
         if not astream:
-            return {"ok": False, "error": "无音视频流"}
+            return {"ok": False, "error": "无音视频流(番剧大会员锁定集仅试看时也可能拿不到完整流)"}
         path, size = download_audio(astream, dest, filename=filename, cookies=cookies)
         if not path:
             return {"ok": False, "error": "音频流下载失败(CDN 拒绝,可稍后重试)"}
         return {"ok": True, "path": str(path), "size": size,
                 "codecs": astream.get("codecs", ""), "mode": "audio",
-                "note": "该稿件无视频轨,已降级为音频"}
+                "note": ("该稿件无视频轨,已降级为音频"
+                         + (f"; {_preview_note}" if _preview_note else ""))}
     vpath, vsize = download_video(vstream, dest, cookies=cookies)
     if not vpath:
         return {"ok": False, "error": "视频流下载失败(CDN 拒绝,可稍后重试)"}
@@ -319,7 +353,8 @@ def bilibili_download_media(url: str, dest_dir: str | Path, *,
                     except OSError:
                         pass
                 return {"ok": True, "path": msg, "size": out.stat().st_size,
-                        "codecs": vstream.get("codecs", ""), "mode": "video", "merged": True}
+                        "codecs": vstream.get("codecs", ""), "mode": "video", "merged": True,
+                        "note": _preview_note or ""}
             # 合并失败:保留视频流并报告
             if filename:
                 vp = Path(vpath)
@@ -331,7 +366,8 @@ def bilibili_download_media(url: str, dest_dir: str | Path, *,
                     pass
             return {"ok": True, "path": str(vpath), "size": vsize,
                     "codecs": vstream.get("codecs", ""), "mode": "video",
-                    "note": f"音视频合并失败({msg[:60]}),已保留视频流"}
+                    "note": (f"音视频合并失败({msg[:60]}),已保留视频流"
+                             + (f"; {_preview_note}" if _preview_note else ""))}
     if filename:
         vp = Path(vpath)
         vp2 = dest / (filename if filename.lower().endswith(".mp4") else f"{filename}.mp4")
@@ -341,7 +377,8 @@ def bilibili_download_media(url: str, dest_dir: str | Path, *,
         except OSError:
             pass
     return {"ok": True, "path": str(vpath), "size": vsize,
-            "codecs": vstream.get("codecs", ""), "mode": "video", "note": "无音频轨"}
+            "codecs": vstream.get("codecs", ""), "mode": "video",
+            "note": ("无音频轨" + (f"; {_preview_note}" if _preview_note else ""))}
 
 
 def bilibili_download(url: str, dest_dir: str | Path, *,

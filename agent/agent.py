@@ -91,6 +91,12 @@ SYSTEM_PROMPT = """你是一个网页自动化 Agent,正在执行一个账号注
       便于区分),落地后再处理下一条;单条失败跳过继续;
     - 完成判定:所有选中的条目都处理完(或到达上限)才 done(success=true);
       **只抓第一个就 done 视为失败**;done 的 value 必须报告「已下载 X/N 个匹配条目」。
+6.7 站点无法访问:观察到的页面 URL 是 chrome-error:// 或以 chrome-error://chromewebdata/
+    开头,或标题/正文含 ERR_CONNECTION_TIMED_OUT / ERR_CONNECTION_REFUSED /
+    ERR_NAME_NOT_RESOLVED / ERR_INTERNET_DISCONNECTED 等网络错误,说明目标站点当前
+    不可达 —— **不要**反复 goto/wait 重试(每次重试都空耗几分钟预算,线上事故:
+    假候选 vercel.app 连不通,Agent 重试 900s 把整个兜底预算吃完)。确认一次后
+    直接 done(success=false,value=「站点无法访问: <错误摘要>」)。
 7. 如果页面标题是 "Just a moment..." 或页面显示 Cloudflare 校验:说明在做浏览器校验,
    用 wait(5000~10000ms) 等它完成,校验通过后页面会正常加载;最多等 5 次,仍不行再 done(success=false)。
 8. 预算:你最多有 __MAX_STEPS__ 步,每步都要推进任务。重复动作超过 3 次视为卡住,应换策略或 done(success=false);

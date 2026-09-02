@@ -8,6 +8,7 @@ from unittest import mock
 
 from skills.bilibili import (
     best_audio_stream,
+    best_video_stream,
     bilibili_download,
     extract_playinfo,
     is_bilibili_url,
@@ -28,6 +29,29 @@ _PLAYINFO = {
                  "bandwidth": 131072, "codecs": "mp4a.40.2"},
             ],
         }
+    },
+}
+
+# 番剧(bangumi)页 playinfo:pgc API 结构,根键是 result 而不是 data ——
+# 线上事故:『凡人修仙传 第10集』→ bangumi/play/ep733325,旧代码只读 data.dash
+# 导致音视频流全空、第10集瞬间失败。两个根都必须认。
+_BANGUMI_PLAYINFO = {
+    "code": 0,
+    "result": {
+        "is_preview": 0,
+        "dash": {
+            "duration": 1440,
+            "video": [
+                {"id": 120, "baseUrl": "https://cn-v1.m4s", "bandwidth": 9580163,
+                 "codecs": "avc1.640033"},
+                {"id": 112, "baseUrl": "https://cn-v2.m4s", "bandwidth": 3901891,
+                 "codecs": "avc1.640032"},
+            ],
+            "audio": [
+                {"id": 30280, "baseUrl": "https://cn-a1.m4s", "bandwidth": 192000,
+                 "codecs": "mp4a.40.2"},
+            ],
+        },
     },
 }
 
@@ -85,6 +109,87 @@ class TestBasics(unittest.TestCase):
         s = best_audio_stream(_PLAYINFO)
         self.assertEqual(s["id"], 30280)                 # 192k > 128k > 64k
         self.assertIsNone(best_audio_stream({}))
+
+    def test_bangumi_playinfo_result_root(self):
+        """番剧页 playinfo 根键是 result:视频/音频流必须能从 result.dash 取到。"""
+        v = best_video_stream(_BANGUMI_PLAYINFO)
+        self.assertIsNotNone(v)
+        self.assertEqual(v["id"], 120)                   # 按码率取最佳
+        a = best_audio_stream(_BANGUMI_PLAYINFO)
+        self.assertIsNotNone(a)
+        self.assertEqual(a["id"], 30280)
+
+    def test_bangumi_download_media_video(self):
+        """bilibili_download_media 在 result 根结构下能完成视频流+音频流下载合并。"""
+        from skills.bilibili import bilibili_download_media
+
+        with tempfile.TemporaryDirectory() as td:
+            session = _FakeSession(_BANGUMI_PLAYINFO)
+
+            class _Resp:
+                status_code = 200
+
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, *a):
+                    return False
+
+                def iter_content(self, n):
+                    yield b"\x00\x00\x00\x18ftypmp42" + b"\x00" * 128   # fMP4 魔数
+
+            merged = Path(td) / "merged.mp4"
+            merged.write_bytes(b"\x00" * 256)
+
+            def _fake_merge(v, a, dest, **kw):
+                # 与真实合并一致:合并产物落盘 dest
+                Path(dest).write_bytes(merged.read_bytes())
+                return True, str(dest)
+
+            with mock.patch("skills.bilibili.requests.get", return_value=_Resp()), \
+                 mock.patch("skills.bilibili.merge_av_ffmpeg", side_effect=_fake_merge):
+                r = bilibili_download_media("https://www.bilibili.com/bangumi/play/ep733325",
+                                            td, session=session)
+            self.assertTrue(r["ok"], r.get("error"))
+            self.assertEqual(r["mode"], "video")
+            self.assertIn("merged", str(r["path"]))
+
+    def test_bangumi_preview_note(self):
+        """大会员试看集(is_preview=1):结果带诚实标注,不冒充完整正片。"""
+        import copy
+
+        from skills.bilibili import bilibili_download_media
+
+        pi = copy.deepcopy(_BANGUMI_PLAYINFO)
+        pi["result"]["is_preview"] = 1
+        with tempfile.TemporaryDirectory() as td:
+            session = _FakeSession(pi)
+
+            class _Resp:
+                status_code = 200
+
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, *a):
+                    return False
+
+                def iter_content(self, n):
+                    yield b"\x00\x00\x00\x18ftypmp42" + b"\x00" * 128
+
+            merged = Path(td) / "merged.mp4"
+            merged.write_bytes(b"\x00" * 256)
+
+            def _fake_merge(v, a, dest, **kw):
+                Path(dest).write_bytes(merged.read_bytes())
+                return True, str(dest)
+
+            with mock.patch("skills.bilibili.requests.get", return_value=_Resp()), \
+                 mock.patch("skills.bilibili.merge_av_ffmpeg", side_effect=_fake_merge):
+                r = bilibili_download_media("https://www.bilibili.com/bangumi/play/ep733325",
+                                            td, session=session)
+            self.assertTrue(r["ok"], r.get("error"))
+            self.assertIn("试看", r.get("note", ""))
 
 
 class TestPlayinfo(unittest.TestCase):

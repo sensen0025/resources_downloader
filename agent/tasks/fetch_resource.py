@@ -876,7 +876,10 @@ def _pipeline(
             blocked = 1 if (it[1] or "").startswith("blocked") else 0
             # 皮肤站搜索页优先(领域知识入口,比视频/攻略页更可能有真皮肤)
             skin = 0 if (it[1] or "").startswith("皮肤站") else 1
-            return (skin, blocked, bad, 0 if "下载按钮" in it[1] else 1, -s)
+            # 音视频任务:B站候选优先(播放流 DASH 可抓,是媒体任务最可靠来源)
+            bili = 0 if (_is_media_intent(query, file_types)
+                         and "bilibili.com" in it[0]) else 1
+            return (skin, bili, blocked, bad, 0 if "下载按钮" in it[1] else 1, -s)
 
         ordered = sorted(agent_candidates, key=_rep_key)
         tried = 0
@@ -911,12 +914,18 @@ def _pipeline(
             _emit(on_stage, "agent",
                   f"🤖 第 {tried}/{_MAX_AGENT_ATTEMPTS} 次 Agent 尝试: {url[:80]} ({reason})")
             # 列表意图:候选是列表页/合集/多P 时先走「枚举→逐条抓取」,命中即完成
+            # 单候选时间预算按 Agent 阶段剩余收紧:死站被预检跳过,但个别慢站/大列表
+            # 仍可能拖垮阶段预算 —— 每个候选最多用掉(剩余-30s),保证后面候选有机会
+            _remaining_phase = _AGENT_PHASE_BUDGET - (time.monotonic() - agent_phase_started)
+            _ms_cap = 900.0 if _is_list_intent(query, file_types) else 300.0
+            _cand_seconds = min(_ms_cap, max(120.0, _remaining_phase - 30.0))
             if (_is_list_intent(query, file_types)
                     and (_looks_like_list_url(url) or "bilibili.com/video" in url
                          or "列表" in reason or "索引" in reason)):
                 list_files = _list_fetch_candidate(url, file_types, out_dir, query,
                                                    login_email, username, verbose,
-                                                   reuse_cookies, is_cancelled, on_stage)
+                                                   reuse_cookies, is_cancelled, on_stage,
+                                                   max_seconds=_cand_seconds)
                 if list_files:
                     kept = []
                     for f in list_files:
@@ -946,7 +955,7 @@ def _pipeline(
                 continue
             ares = _agent_fetch(url, file_types, out_dir, login_email, username,
                                 verbose, reuse_cookies, is_cancelled, on_stage=on_stage,
-                                query=query)
+                                query=query, max_seconds=_cand_seconds)
             ok = bool(ares and getattr(ares, "success", False))
             _log_site(site_log, url, query, agent_ok=ok)
             # 皮肤任务:Agent 最后停留页面的标题用于名字匹配验收
@@ -1357,6 +1366,52 @@ def _download_one(url: str, out_dir: Path, file_types: tuple[str, ...],
     return None
 
 
+def _is_reachable(url: str, timeout: float = 10.0) -> bool:
+    """站点可达性预检(与请求层同走代理):连接超时/拒绝/DNS 失败 → 不可达。
+
+    线上事故:『凡人修仙传 第10集』的搜索候选 v0-frontend-project-implementation-phi.
+    vercel.app 与查询毫无关系且连不通,浏览器 Agent 在 chrome-error 页反复 goto/wait
+    空耗 900s,把 Agent 阶段预算全吃完,后面的候选没机会试。
+    403/5xx/412 也算可达(浏览器可能能过,如 B站 412 反爬);只有连接层失败才算不可达。
+    """
+    try:
+        from urllib.parse import urlsplit
+
+        host = urlsplit(url).netloc
+        if not host:
+            return False
+    except Exception:
+        return False
+    try:
+        import requests
+
+        from proxy import proxies
+
+        headers = {"User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+            "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36")}
+        try:
+            r = requests.get(url, headers=headers, timeout=(timeout, timeout),
+                             stream=True, proxies=proxies(), allow_redirects=True)
+        except requests.exceptions.SSLError:
+            # 代理/中间人证书问题:只做可达性探测(不传数据),降级不校验证书重试一次
+            import urllib3
+
+            urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+            r = requests.get(url, headers=headers, timeout=(timeout, timeout),
+                             stream=True, proxies=proxies(), allow_redirects=True,
+                             verify=False)
+        try:
+            r.close()
+        except Exception:
+            pass
+        return True
+    except requests.exceptions.RequestException:
+        return False
+    except Exception:
+        return False
+
+
 def _security_gate(path: str) -> tuple[str, str]:
     """下载查毒闸门:扫描文件,infected/suspicious 时删除并返回 (verdict, 摘要)。
 
@@ -1564,8 +1619,15 @@ def _fetch_bilibili_direct(url: str, dest_dir: Path, filename: str,
 
 def _list_fetch_candidate(url: str, file_types, out_dir: Path, query: str,
                           login_email: str, username: str, verbose: bool,
-                          reuse_cookies: bool, is_cancelled, on_stage) -> Optional[list[str]]:
+                          reuse_cookies: bool, is_cancelled, on_stage,
+                          max_seconds: Optional[float] = None) -> Optional[list[str]]:
     """列表候选:枚举(Agent) → 逐条确定性抓取。返回落地文件列表;失败返回 None。"""
+    # 站点不可达:不开浏览器枚举(枚举开一次浏览器 + goto 45s,别浪费在死站上)
+    if not _is_reachable(url):
+        _emit(on_stage, "list", f"站点不可达,跳过列表候选: {url[:60]}")
+        if verbose:
+            print(f"    站点不可达,跳过列表候选: {url[:90]}")
+        return None
     items = _enumerate_items(url, query, file_types, out_dir, login_email, username,
                              verbose, reuse_cookies, is_cancelled, on_stage)
     if not items:
@@ -1586,7 +1648,7 @@ def _list_fetch_candidate(url: str, file_types, out_dir: Path, query: str,
             else:
                 ares = _agent_fetch(it["url"], file_types, out_dir, login_email, username,
                                     verbose, reuse_cookies, is_cancelled, on_stage,
-                                    query=it["title"] or query)
+                                    query=it["title"] or query, max_seconds=max_seconds)
                 path = None
                 if ares is not None and ares.success:
                     # 该条目 Agent 落地文件:取任务目录新增文件
@@ -1613,12 +1675,14 @@ def _agent_fetch(url: str, file_types: tuple[str, ...], out_dir: Path,
                  verbose: bool = True, reuse_cookies: bool = True,
                  is_cancelled: Optional[Callable[[], bool]] = None,
                  on_stage: Optional[Callable[[str, str], None]] = None,
-                 query: str = "") -> Optional["AgentResult"]:
+                 query: str = "",
+                 max_seconds: Optional[float] = None) -> Optional["AgentResult"]:
     """浏览器 Agent:访问页面 →(注册/登录)→ 定位下载 → 下载。
 
     reuse_cookies=True 时按站点域复用 accounts/cookies/ 的登录态
     (与 run_account.py 同一存储,免重复登录),Agent 成功后回存刷新。
     on_stage 转发 Agent 的每一步自汇报(观察/推理/动作/结果)为 agent 阶段事件。
+    max_seconds: 单候选时间预算(缺省按列表/普通任务 900s/300s)。
     返回 AgentResult(含 final_title,皮肤任务名字匹配验收用);异常返回 None。
     """
     import secrets
@@ -1631,6 +1695,14 @@ def _agent_fetch(url: str, file_types: tuple[str, ...], out_dir: Path,
     from agent.browser import BrowserSession
     from agent.cookies import find_cookies, has_cookies
     from agent.llm import LLMClient
+
+    # 站点可达性预检:连不通的候选(连接超时/拒绝/DNS 失败)不开浏览器,
+    # 避免 Agent 在 chrome-error 页反复重试空耗预算(线上事故:vercel.app 900s)
+    if not _is_reachable(url):
+        _emit(on_stage, "agent", f"站点不可达(连接失败),跳过: {url[:70]}")
+        if verbose:
+            print(f"    站点不可达,跳过: {url[:90]}")
+        return None
 
     # 子域回退查找登录态(导入的本地 cookie 按注册域存档,www/m 子域都能命中)
     ck = find_cookies(urlsplit(url).netloc.lower(), login_email)
@@ -1719,10 +1791,11 @@ def _agent_fetch(url: str, file_types: tuple[str, ...], out_dir: Path,
                 _emit(on_stage, "agent", _progress_line(line))
 
             is_list = _is_list_intent(query, file_types)
+            ms = max_seconds if max_seconds is not None else (900.0 if is_list else 300.0)
             agent = AccountAgent(session=session, llm=LLMClient(), goal=goal,
                                  allowed_domain="",
                                  max_steps=120 if is_list else 60,   # 列表任务要多条抓取
-                                 max_seconds=900.0 if is_list else 300.0,  # 单候选时间预算
+                                 max_seconds=ms,  # 单候选时间预算(调用方可按阶段剩余收紧)
                                  progress=_agent_progress)
             # 注入任务输出目录 + 文件类型:Agent 的 download/流式/拼接等工具默认落到 downloads/,
             # 必须强制到任务目录 —— 否则交付层收不到文件,网页 done 却没有下载按钮;
