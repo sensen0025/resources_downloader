@@ -114,6 +114,13 @@ class IntentModel(BaseModel):
     constraints: dict = {}
 
 
+class SkillRequest(BaseModel):
+    """定向技能调用(dsh_targeted_skills 白名单:小说/壁纸/游戏/皮肤/图书寻源)。"""
+
+    name: str = Field(max_length=64)
+    args: dict = Field(default_factory=dict)
+
+
 class TaskRequest(BaseModel):
     query: str = Field(default="", max_length=500)       # 防超长 Query 撑爆 Agent/LLM Prompt(ReDoS/上下文溢出)
     seed_urls: List[str] = Field(default_factory=list, max_length=20)
@@ -228,6 +235,36 @@ def me(owner: str = Depends(current_owner)) -> dict:
 
 
 # ---------------------------------------------------------------- 任务契约
+
+_SKILL_NAMES = ("biquge_novel_crawler", "haowallpaper_4k_extractor",
+                "gdgame_resource_fetcher", "littleskin_texture_extractor",
+                "annas_archive_book_finder")
+
+
+@app.post("/api/v1/skills/run")
+def run_skill_api(req: SkillRequest, request: Request,
+                  owner: str = Depends(current_owner)) -> dict:
+    """定向技能执行(DSH skill_invoke 的后端):白名单 + schema 校验 + 同步执行。
+
+    与任务管线正交 —— 这些是「单站点确定性提取器」,由 AI(DSH agent /
+    Resource Hub Agent)决定何时调用;耗时技能(biquge 全本等)建议在任务管线
+    内通过 resource_fetch(query) 走异步任务,而非此处长阻塞。
+    """
+    if req.name not in _SKILL_NAMES:
+        return _error(422, "UNKNOWN_SKILL",
+                      f"未知技能 {req.name!r},可选: {', '.join(_SKILL_NAMES)}")
+    try:
+        import dsh_targeted_skills as dts
+    except Exception as e:
+        return _error(500, "SKILL_IMPORT_FAILED", f"技能模块不可用: {type(e).__name__}: {str(e)[:120]}")
+    tr = dts.run_skill(req.name, dict(req.args or {}))
+    data = dict(tr.data or {})
+    data.pop("_tool", None)
+    if tr.ok:
+        return _ok({"name": req.name, "ok": True, "message": tr.message, "data": data})
+    code = "INVALID_ARGS" if tr.error == "INVALID_ARGS" else (tr.error or "SKILL_FAILED")
+    return _error(422 if code == "INVALID_ARGS" else 500, code, tr.message)
+
 
 @app.post("/api/v1/tasks", status_code=202)
 def create_task(req: TaskRequest, request: Request,
