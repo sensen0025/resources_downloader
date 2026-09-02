@@ -128,18 +128,22 @@ def extract_playinfo(page) -> dict:
 
 
 def _dash_of(playinfo: dict) -> dict:
-    """DASH 流根:普通视频页 playinfo 在 data.dash,番剧(bangumi)页在 result.dash。
+    """DASH 流根:普通视频页在 data.dash;番剧(bangumi)页结构不一 ——
+    pgc API 在 result.dash,页面 __playinfo__ 在 result.video_info.dash。
 
-    线上事故:『凡人修仙传 第10集』→ bilibili.com/bangumi/play/ep733325 的
-    __playinfo__ 是 pgc API 结构(根键 result),旧代码只认 data → 音视频流全空,
-    第10集瞬间失败。两个根都认,谁有流用谁。
+    线上事故:『凡人修仙传 第10集』→ bangumi/play/ep733325,页面 playinfo 的
+    DASH 藏在 result.video_info.dash,旧代码只认 data.dash → 流全空、第10集失败。
+    data/result 两个根,每个根再查 dash 与 video_info.dash 两处,谁有流用谁。
     """
     if not isinstance(playinfo, dict):
         return {}
     for root in ("data", "result"):
         d = playinfo.get(root)
-        if isinstance(d, dict) and isinstance(d.get("dash"), dict) and d["dash"]:
-            return d["dash"]
+        if not isinstance(d, dict):
+            continue
+        for cand in (d.get("dash"), (d.get("video_info") or {}).get("dash")):
+            if isinstance(cand, dict) and cand:
+                return cand
     return {}
 
 
@@ -151,6 +155,63 @@ def _play_root(playinfo: dict) -> dict:
         d = playinfo.get(root)
         if isinstance(d, dict) and d:
             return d
+    return {}
+
+
+def _is_preview_playinfo(playinfo: dict) -> bool:
+    """大会员试看标记:result/data 根或 video_info 里的 is_preview=1。"""
+    root = _play_root(playinfo)
+    if not root:
+        return False
+    if root.get("is_preview"):
+        return True
+    vi = root.get("video_info")
+    return bool(isinstance(vi, dict) and vi.get("is_preview"))
+
+
+def _is_bangumi_url(url: str) -> bool:
+    return bool(url) and "/bangumi/play/" in url
+
+
+def _has_usable_streams(playinfo: dict) -> bool:
+    """DASH 里是否真有可下载的流(baseUrl/backupUrl 至少一个非空)。
+
+    线上事故:番剧页 video_info.dash 的条目 baseUrl 全是 None(占位流),
+    best_video_stream 取得到"流"但下载必败 —— 必须验证 URL 真实存在。
+    """
+    dash = _dash_of(playinfo)
+    for group in ("video", "audio"):
+        for st in dash.get(group) or []:
+            if st.get("baseUrl") or st.get("backupUrl"):
+                return True
+    return False
+
+
+def _pgc_playurl_api(url: str, cookies: Optional[dict] = None) -> dict:
+    """番剧页 playinfo 拿不到 DASH 时,调 pgc playurl API 兜底。
+
+    与 __playinfo__ 同构(根 result,含 dash),失败返回 {}。
+    带上会话 cookie(登录/大会员状态决定清晰度与是否试看)。
+    """
+    m = re.search(r"/bangumi/play/ep(\d+)", url or "")
+    if not m:
+        return {}
+    try:
+        import requests
+
+        from proxy import proxies
+
+        r = requests.get(
+            "https://api.bilibili.com/pgc/player/web/playurl",
+            params={"ep_id": m.group(1), "qn": "80", "fnval": "16", "fourk": "1"},
+            headers={"User-Agent": _UA, "Referer": url},
+            timeout=20, proxies=proxies(), cookies=cookies,
+        )
+        j = r.json()
+        if j.get("code") == 0 and j.get("result"):
+            return j
+    except Exception:
+        pass
     return {}
 
 
@@ -294,9 +355,21 @@ def bilibili_download_media(url: str, dest_dir: str | Path, *,
     if not playinfo:
         return {"ok": False, "error": "页面未找到 playinfo(B站可能要求登录/分区限制/页面布局变更)"}
 
-    # 番剧大会员锁定集的试看标记:pgc 结构在 result.is_preview(1=大会员试看,非完整正片)
-    _root = _play_root(playinfo)
-    _preview = bool(_root.get("is_preview")) if _root else False
+    # 番剧(bangumi)集:页面 playinfo 的 video_info.dash 常是 baseUrl=None 的占位流,
+    # pgc playurl API(带会话 cookie)才是权威源 —— 有可用流就替换;
+    # 非番剧页面流不可用时也试 API 兜底(非番剧 URL 会直接返回空,无副作用)。
+    try:
+        ck_d = {c["name"]: c["value"] for c in session.context.cookies()} \
+            if (session is not None and session.context is not None) else None
+    except Exception:
+        ck_d = None
+    if _is_bangumi_url(url) or not _has_usable_streams(playinfo):
+        api_pi = _pgc_playurl_api(url, cookies=ck_d)
+        if _has_usable_streams(api_pi):
+            playinfo = api_pi
+
+    # 试看标记:pgc 结构的 result.is_preview / video_info.is_preview(1=大会员试看,非完整正片)
+    _preview = _is_preview_playinfo(playinfo)
     _preview_note = "该集为大会员试看版(可能非完整正片)" if _preview else ""
 
     cookies = None

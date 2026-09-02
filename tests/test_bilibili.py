@@ -32,10 +32,35 @@ _PLAYINFO = {
     },
 }
 
-# 番剧(bangumi)页 playinfo:pgc API 结构,根键是 result 而不是 data ——
+# 番剧(bangumi)页 playinfo:pgc 结构,根键是 result —— 页面 __playinfo__ 的
+# DASH 藏在 result.video_info.dash(pgc API 则直接在 result.dash)。
 # 线上事故:『凡人修仙传 第10集』→ bangumi/play/ep733325,旧代码只读 data.dash
-# 导致音视频流全空、第10集瞬间失败。两个根都必须认。
+# 导致音视频流全空、第10集瞬间失败。所有根与嵌套位置都必须认。
 _BANGUMI_PLAYINFO = {
+    "code": 0,
+    "result": {
+        "play_video_type": "whole",
+        "video_info": {
+            "is_preview": 0,
+            "dash": {
+                "duration": 1440,
+                "video": [
+                    {"id": 120, "baseUrl": "https://cn-v1.m4s", "bandwidth": 9580163,
+                     "codecs": "avc1.640033"},
+                    {"id": 112, "baseUrl": "https://cn-v2.m4s", "bandwidth": 3901891,
+                     "codecs": "avc1.640032"},
+                ],
+                "audio": [
+                    {"id": 30280, "baseUrl": "https://cn-a1.m4s", "bandwidth": 192000,
+                     "codecs": "mp4a.40.2"},
+                ],
+            },
+        },
+    },
+}
+
+# pgc playurl API 返回结构:result.dash 直接在根下
+_BANGUMI_API_PLAYINFO = {
     "code": 0,
     "result": {
         "is_preview": 0,
@@ -44,8 +69,6 @@ _BANGUMI_PLAYINFO = {
             "video": [
                 {"id": 120, "baseUrl": "https://cn-v1.m4s", "bandwidth": 9580163,
                  "codecs": "avc1.640033"},
-                {"id": 112, "baseUrl": "https://cn-v2.m4s", "bandwidth": 3901891,
-                 "codecs": "avc1.640032"},
             ],
             "audio": [
                 {"id": 30280, "baseUrl": "https://cn-a1.m4s", "bandwidth": 192000,
@@ -111,13 +134,75 @@ class TestBasics(unittest.TestCase):
         self.assertIsNone(best_audio_stream({}))
 
     def test_bangumi_playinfo_result_root(self):
-        """番剧页 playinfo 根键是 result:视频/音频流必须能从 result.dash 取到。"""
+        """番剧页 playinfo 根键是 result 且 DASH 在 video_info.dash:必须能取到流。"""
         v = best_video_stream(_BANGUMI_PLAYINFO)
         self.assertIsNotNone(v)
         self.assertEqual(v["id"], 120)                   # 按码率取最佳
         a = best_audio_stream(_BANGUMI_PLAYINFO)
         self.assertIsNotNone(a)
         self.assertEqual(a["id"], 30280)
+
+    def test_bangumi_api_playinfo_result_dash(self):
+        """pgc playurl API 结构(result.dash 直接在根下)也要能取到流。"""
+        v = best_video_stream(_BANGUMI_API_PLAYINFO)
+        self.assertIsNotNone(v)
+        self.assertEqual(v["id"], 120)
+
+    def test_pgc_playurl_api_fallback(self):
+        """番剧页 video_info.dash 是 baseUrl=None 的占位流 → 自动改走 pgc API。
+
+        线上事故:『凡人修仙传 第10集』ep733325 页面流全是占位(下载必败),
+        必须用 pgc playurl API(带会话 cookie)的 result.dash 替换。
+        """
+        from skills.bilibili import bilibili_download_media
+
+        # 页面 playinfo:DASH 存在但所有流 baseUrl=None(占位)
+        placeholder_page = {
+            "code": 0,
+            "result": {
+                "play_video_type": "whole",
+                "video_info": {
+                    "is_preview": 0,
+                    "dash": {
+                        "video": [{"id": 80, "baseUrl": None, "backupUrl": None,
+                                   "bandwidth": 1839517, "codecs": "avc1.64001F"}],
+                        "audio": [{"id": 30280, "baseUrl": None, "backupUrl": None,
+                                   "bandwidth": 199521, "codecs": "mp4a.40.2"}],
+                    },
+                },
+            },
+        }
+        with tempfile.TemporaryDirectory() as td:
+            session = _FakeSession(placeholder_page)
+
+            class _Resp:
+                status_code = 200
+
+                def json(self):
+                    return _BANGUMI_API_PLAYINFO
+
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, *a):
+                    return False
+
+                def iter_content(self, n):
+                    yield b"\x00\x00\x00\x18ftypmp42" + b"\x00" * 128
+
+            merged = Path(td) / "merged.mp4"
+            merged.write_bytes(b"\x00" * 256)
+
+            def _fake_merge(v, a, dest, **kw):
+                Path(dest).write_bytes(merged.read_bytes())
+                return True, str(dest)
+
+            with mock.patch("skills.bilibili.requests.get", return_value=_Resp()), \
+                 mock.patch("skills.bilibili.merge_av_ffmpeg", side_effect=_fake_merge):
+                r = bilibili_download_media("https://www.bilibili.com/bangumi/play/ep733325",
+                                            td, session=session)
+            self.assertTrue(r["ok"], r.get("error"))
+            self.assertEqual(r["mode"], "video")
 
     def test_bangumi_download_media_video(self):
         """bilibili_download_media 在 result 根结构下能完成视频流+音频流下载合并。"""
@@ -161,7 +246,7 @@ class TestBasics(unittest.TestCase):
         from skills.bilibili import bilibili_download_media
 
         pi = copy.deepcopy(_BANGUMI_PLAYINFO)
-        pi["result"]["is_preview"] = 1
+        pi["result"]["video_info"]["is_preview"] = 1
         with tempfile.TemporaryDirectory() as td:
             session = _FakeSession(pi)
 
