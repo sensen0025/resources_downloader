@@ -19,8 +19,13 @@ B站针对性下载用 **BBDown**（免费、CLI、支持 Web/TV/App 接口、�
 - 检查：`BBDown --help`（✅ 2026-09-06 本机，输出 "BBDown version 1.6.3"）
 
 ## 鉴权前置
-- 免费可下低画质；高清/会员内容需登录：`BBDown login`（扫码网页账号）或
-  `-c "SESSDATA=…" <url>`（Cookie 串）。TV 无水印源：`BBDown logintv` / `-tv -token …`。
+- ✅ 本机已具备登录态：私有 cookie vault（`~/.rd-cookies`，2026-09-06 自 Windows 解密导入，含
+  `SESSDATA/DedeUserID/bili_jct/DedeUserID__ckMd5` 等，约 178 天有效）——任务引擎的 BBDown
+  fast-path 会自动带 `-c`；agent 侧跑 CLI 桥时默认自动带（显式卸载用 `"cookies":false`），
+  **无需再让用户扫码/提供 cookie**。
+- 备选（vault 失效时）：`BBDown login`（扫码网页账号）或 `-c "SESSDATA=…"`。TV 无水印源：
+  `BBDown logintv` / `-tv -token …`。
+- ⚠️ cookie 值属个人隐私：只经 vault/argv 传递，**不得打印进日志、任务输出或记忆**。
 
 ## 探测（先解析不下载）
 ```

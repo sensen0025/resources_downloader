@@ -13,7 +13,10 @@ whenToUse: 用户给 pan.quark.cn/s/xxx 分享链接要下载其中文件，或�
 任意文件类型（压缩包/文档/视频/软件…），分享带目录结构，常需"选文件"而非整包。
 
 ## 访问路径（先要凭证，再谈解析）
-1. 检查凭证：能否拿到夸克登录 Cookie（用户提供 `__puus/__pus` 等，或 `browser` 打开 pan.quark.cn 让用户登录一次——profile 持久后自动带态）。（🧪 未实测，2026-09-06 本环境无登录态）
+1. ✅ 凭证现成：私有 cookie vault（`~/.rd-cookies`，2026-09-06 自 Windows Edge 解密导入，含
+   `__pus/__uid/__kp` 等夸克登录态，⚠️ 有效期短（约 7 天），失效即如实报"需刷新登录态"）。
+   agent 侧：CLI 桥 `fetch`/`download` 默认自动带夸克登录态（显式卸载用 `"cookies":false`）；
+   或 `browser open pan.quark.cn`（profile 持久，登录一次后自动带态）。
 2. 拿链接清单：带 Cookie 请求分享页/其接口 → 递归目录 JSON → 定位目标文件 id/名称。
 3. 取下载直链：对目标文件调转存/直链接口（需登录态），拿到真实下载 URL。
 4. `download_file` 落地（可带 Referer: https://pan.quark.cn/ 与 Cookie）。
@@ -21,6 +24,7 @@ whenToUse: 用户给 pan.quark.cn/s/xxx 分享链接要下载其中文件，或�
 ## 已知风控
 - 无 Cookie：基本止步登录/风控页（✅ 通用规律，未经本站实测）。
 - 有 Cookie：接口易变，具体路径按"当时抓到的请求"写爬虫（write-and-run-crawler），并 memory 记录可用接口形态（日期）。
+- ⚠️ cookie 属个人隐私：不得打印明文进日志/任务输出；vault 匹配不到夸克登录态时如实说明需要刷新。
 
 ## 工具速查
 - 登录态：`browser open pan.quark.cn` → 用户手输/扫码 → `cookies` 导出 → 后续 `http_fetch`/`download_file` 带 `Cookie:` 头。

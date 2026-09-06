@@ -8,12 +8,54 @@
 //   node plugin/tests/e2e.mjs search  '{"query":"...","limit":5}'
 //   node plugin/tests/e2e.mjs run     '{"language":"python","code":"...","workdir":"/tmp/x"}'
 //   node plugin/tests/e2e.mjs runfile '{"language":"python","scriptPath":"/tmp/x/s.py","workdir":"/tmp/x"}'
+//
+// `"cookies"` controls the private vault login state:
+//   - undefined / true  -> attach the user's vault cookies for the URL host (default)
+//   - false             -> stay anonymous (no cookie header), even if host is in vault
+// Values are kept in memory only (env RD_COOKIE_DIR -> vault.json).
+import { readFileSync } from "node:fs";
 import { httpRequest } from "../lib/http.js";
 import { downloadFile } from "../lib/download.js";
 import { downloadHls } from "../lib/hls.js";
 import { probeFile } from "../lib/probe.js";
 import { runCode } from "../lib/exec.js";
 import { webSearch } from "../lib/search.js";
+
+const COOKIE_DIR = process.env.RD_COOKIE_DIR || `${process.env.HOME || ""}/.rd-cookies`;
+
+function domainMatches(cookieDomain, host) {
+  const d = String(cookieDomain || "").trim().toLowerCase();
+  const h = String(host || "").trim().toLowerCase();
+  if (!d || !h) return false;
+  if (d.startsWith(".")) return h === d.slice(1) || h.endsWith(d);
+  return h === d;
+}
+
+/** Cookie header string for host from the vault ("" when none / no vault). */
+export function vaultCookieHeader(url, cookiesEnabled = true) {
+  if (cookiesEnabled === false || !url) return "";
+  try {
+    const host = new URL(url).hostname;
+    const raw = readFileSync(`${COOKIE_DIR}/vault.json`, "utf8");
+    const entries = JSON.parse(raw).entries || [];
+    const now = Math.floor(Date.now() / 1000);
+    const parts = entries
+      .filter((c) => domainMatches(c.domain, host) && (c.session || (c.expires || 0) > now))
+      .map((c) => `${c.name}=${c.value}`);
+    return parts.join("; ");
+  } catch {
+    return "";
+  }
+}
+
+function withCookies(args) {
+  if (args?.cookies === false) return { ...args }; // explicit opt-out: stay anonymous
+  const headers = { ...(args.headers || {}) };
+  const url = args.url || args.m3u8Url || "";
+  const cookie = vaultCookieHeader(url, true);
+  if (cookie && !headers.Cookie) headers.Cookie = cookie;
+  return { ...args, headers };
+}
 
 const [, , cmd, argJson] = process.argv;
 if (!cmd || !argJson) {
@@ -35,13 +77,14 @@ async function main() {
       out = await probeFile(args.path, { sha256: args.sha256 ?? true });
       break;
     case "download":
-      out = await downloadFile(args);
+      out = await downloadFile(withCookies(args));
       break;
     case "hls":
-      out = await downloadHls(args);
+      out = await downloadHls(withCookies(args));
       break;
     case "fetch":
-      out = await httpRequest({ url: args.url, timeoutMs: args.timeoutMs ?? 30000, maxBytes: args.maxBytes ?? 5 * 1024 * 1024 }).then(
+      args = withCookies(args);
+      out = await httpRequest({ url: args.url, headers: args.headers ?? {}, timeoutMs: args.timeoutMs ?? 30000, maxBytes: args.maxBytes ?? 5 * 1024 * 1024 }).then(
         (r) => ({
           status: r.status,
           finalUrl: r.finalUrl,

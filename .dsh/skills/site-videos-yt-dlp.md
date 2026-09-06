@@ -24,9 +24,13 @@ YouTube 视频/音频/字幕检索与下载首选 **yt-dlp**（活跃维护、�
 ## 鉴权前置
 - **公开视频**：直接匿名拉取最高画质（最高可达 4K/8K 60fps AV1/VP9）。
 - **会员视频 / 年龄限制 / 私享列表**：
+  - ✅ 本机已具备 YouTube 登录态（私有 cookie vault `~/.rd-cookies`，2026-09-06 导入，含
+    `SID/SSID/LOGIN_INFO` 等）——任务引擎的 yt-dlp fast-path 自动挂 `--cookies ~/.rd-cookies/netscape/youtube.com.txt`；
+    agent 手动跑时直接 `--cookies ~/.rd-cookies/netscape/youtube.com.txt`。
   - 导出浏览器 Cookie 文件：`yt-dlp --cookies /path/to/cookies.txt "<url>"`
   - 自动读取浏览器 Cookie：`yt-dlp --cookies-from-browser chrome "<url>"`（或 `firefox` / `brave` 等）
   - OAuth 登录（电视端授权）：`yt-dlp --username oauth --password '' "<url>"`（终端提示扫码/输验证码）
+- ⚠️ cookie 属个人隐私：路径本身可写进命令，**明文值不得打印进日志/任务输出**。
 
 ## 探测（先解析不下载）
 ```bash

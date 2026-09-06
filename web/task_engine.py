@@ -11,6 +11,7 @@ import subprocess
 import shutil
 from typing import Dict, List, Optional, AsyncGenerator
 from web.models import TaskInfo, TaskStatus, DownloadRequest, DownloadType, ProbeResult
+from web import cookie_vault
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DB_PATH = os.environ.get("RESOURCES_DB_PATH", os.path.join(BASE_DIR, "web", "tasks.db"))
@@ -286,8 +287,8 @@ class TaskManager:
             
         self.broadcast(task)
 
-    async def _exec_process(self, task: TaskInfo, cmd: List[str], env: dict, line_parser=None):
-        task.logs.append(f"⚡ 执行命令: {' '.join(cmd)}")
+    async def _exec_process(self, task: TaskInfo, cmd: List[str], env: dict, line_parser=None, secrets=()):
+        task.logs.append(f"⚡ 执行命令: {cookie_vault.redact(' '.join(cmd), secrets)}")
         self.broadcast(task)
         proc = await asyncio.create_subprocess_exec(
             *cmd,
@@ -302,6 +303,7 @@ class TaskManager:
                 break
             line = line_bytes.decode('utf-8', errors='ignore').strip()
             if line:
+                line = cookie_vault.redact(line, secrets)
                 task.logs.append(line)
                 if line_parser:
                     line_parser(line, task)
@@ -316,6 +318,12 @@ class TaskManager:
         os.makedirs(os.path.dirname(out_tpl), exist_ok=True)
         
         cmd = ["yt-dlp", "--js-runtimes", "node", "--newline", "-o", out_tpl]
+        secrets = []
+        # Attach the user's own vault cookies when present (membership/age-gated content)
+        yt_cookies = cookie_vault.cookies_for_host("youtube.com")
+        yt_netscape = os.path.join(cookie_vault.COOKIE_DIR, "netscape", "youtube.com.txt")
+        if yt_cookies and os.path.exists(yt_netscape):
+            cmd.extend(["--cookies", yt_netscape])
         if req.format_option == "audio_only":
             cmd.extend(["-x", "--audio-format", "mp3", "--audio-quality", "0"])
         else:
@@ -338,13 +346,20 @@ class TaskManager:
                 t.output_file = m_dest.group(1).strip()
                 t.title = os.path.basename(t.output_file)
 
-        await self._exec_process(task, cmd, env, parse_ytdlp)
+        await self._exec_process(task, cmd, env, parse_ytdlp, secrets)
 
     async def _exec_bilibili(self, task: TaskInfo, req: DownloadRequest, env: dict):
         out_dir = os.path.join(DEFAULT_DOWNLOAD_DIR, "bilibili")
         os.makedirs(out_dir, exist_ok=True)
         
         cmd = ["BBDown", "--work-dir", out_dir, "-hs"]
+        secrets = []
+        # Vault login: full bilibili cookie header for higher quality / member content.
+        # The header is passed via argv (-c) so it MUST be redacted from task logs.
+        bili_header = cookie_vault.cookie_header("bilibili.com")
+        if bili_header:
+            cmd.extend(["-c", bili_header])
+            secrets = [bili_header]
         if req.format_option == "audio_only":
             cmd.append("--audio-only")
         cmd.append(req.url_or_query)
@@ -363,7 +378,7 @@ class TaskManager:
                     if f.endswith(".mp4") or f.endswith(".m4a") or f.endswith(".flv"):
                         t.output_file = os.path.join(out_dir, f)
 
-        await self._exec_process(task, cmd, env, parse_bbdown)
+        await self._exec_process(task, cmd, env, parse_bbdown, secrets)
 
     async def _run_dsh_agent(self, task: TaskInfo, req: DownloadRequest, env: dict):
         repo = BASE_DIR
@@ -375,6 +390,9 @@ class TaskManager:
         scan_dirs = [dl_dir, DEFAULT_DOWNLOAD_DIR]
         before = self._snapshot_files(scan_dirs)
         dsh = shutil.which("dsh") or os.path.expanduser("~/.local/node/bin/dsh")
+        # Give the headless agent read access to the private cookie vault (path only;
+        # values stay inside vault files, never on the command line or in logs).
+        env["RD_COOKIE_DIR"] = cookie_vault.COOKIE_DIR
         proc = await asyncio.create_subprocess_exec(
             dsh, "--profile", "headless", self._dsh_prompt(req.url_or_query, repo, dl_dir),
             cwd=repo, stdout=asyncio.subprocess.PIPE,
@@ -433,7 +451,11 @@ class TaskManager:
             "若你无法直接调用 download_file/probe_file（本会话可能未挂 rd-tools 插件），"
             "就用 bash 运行等价的真实 CLI 桥：cd " + repo +
             " && node plugin/tests/e2e.mjs download '{\"url\":\"<URL>\",\"outDir\":\"" + dl_dir + "\"}'"
-            "（验证用 e2e.mjs probe）。视频/图书/学术等按 site-* 技能与真实本机工具处理。"
+            "（验证用 e2e.mjs probe）。涉及登录站点（如 B站/夸克/YouTube 会员内容）时，"
+            "环境变量 RD_COOKIE_DIR 指向本机私有 cookie vault：e2e.mjs 的 fetch/download "
+            "默认对 vault 内的域自动带登录态（按 cookie-vault 技能决定是否显式 \"cookies\":false 卸载）"
+            "——不要把 cookie 明文写进你的输出/日志。"
+            "视频/图书/学术等按 site-* 技能与真实本机工具处理。"
             "禁止假装成功：拿不到文件就明确说明障碍。最后一行输出："
             'FINAL_JSON:{"path":"绝对路径","size":N,"note":"说明"} 或 FINAL_JSON:{"error":"原因"}'
         )

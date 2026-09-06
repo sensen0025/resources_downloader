@@ -34,6 +34,7 @@ verdict 与分对应：`ok / partial / blocked / needs_login / unknown`。
   - `ua=浏览器+Referer 可绕过 403`
   - `profile 持久+登录一次，之后 cookies 直接下载`
 - `notes`：一两句定性（这是什么、为什么有用/没用）。
+- 登录态站点：vault（`~/.rd-cookies`，env `RD_COOKIE_DIR`）已含该域时记 `methods: cookie vault 直通` + 记录日期；cookie 值严禁写入记忆。
 
 ## 查看类似网站（memory_query）
 - `query domain=X similar=true`：返回同域/别名优先、再按共享 tags+类型排序的相似记录（找**同一服务的其它镜像**、或同类服务）。
