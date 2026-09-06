@@ -11,8 +11,10 @@ import subprocess
 from typing import Dict, List, Optional, AsyncGenerator
 from web.models import TaskInfo, TaskStatus, DownloadRequest, DownloadType, ProbeResult
 
-DB_PATH = "/home/sensen/resources_downloader/web/tasks.db"
-DEFAULT_DOWNLOAD_DIR = "/home/sensen/Downloads"
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+DB_PATH = os.environ.get("RESOURCES_DB_PATH", os.path.join(BASE_DIR, "web", "tasks.db"))
+DEFAULT_DOWNLOAD_DIR = os.environ.get("DOWNLOAD_DIR", os.path.expanduser("~/Downloads"))
+os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
 os.makedirs(DEFAULT_DOWNLOAD_DIR, exist_ok=True)
 
 def init_db():
