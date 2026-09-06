@@ -17,6 +17,7 @@ class DownloadType(str, Enum):
     ANNAS_ARCHIVE = "annas_archive"
     DIRECT = "direct"
     HLS = "hls"
+    QUERY = "query"
 
 class DownloadRequest(BaseModel):
     url_or_query: str = Field(..., description="Target URL or keyword query")

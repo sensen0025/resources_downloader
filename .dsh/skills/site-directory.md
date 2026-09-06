@@ -31,6 +31,8 @@ whenToUse: 用户要的资源属于某站点/某类型，需要判断"这个站�
 | 网盘 | site-quark-netdisk | 夸克分享(需登录 Cookie) | 🧪 |
 | 视频/流 | site-bilibili | B站风控/出口知识（降级用；首选见 A 表 bbdown） | 🧪 |
 | 小说 | site-biquge-novel | 笔趣阁站群套路 | 🧪 |
+| 游戏/软件盘 | site-gdgame | GDGAME 单机游戏：多网盘(夸克/百度/UC/123/移动)二维码→分享链接/PNG+提取码 | ✅ 链路(2026-09-06 海外出口实测) |
+| 图片/壁纸 | site-haowallpaper | 哲风壁纸详情页→CDN 直链取大图(4K 需登录/积分) | 🧪(旧卡知识迁移，待实测) |
 
 ## 怎么用
 1. `memory_query` 查域（记忆可能比卡更新鲜）。

@@ -62,7 +62,7 @@ DSH = 唯一的大脑(规划、多轮策略、失败重试、探针校验交付)
 
 | 路径 | 内容 |
 |---|---|
-| `.dsh/skills/*.md` | **17 个 DSH 技能卡**：通用 6 个（`resource-download`、`find-and-resolve-sources`、`write-and-run-crawler`、`download-and-verify`、`site-memory`、`captcha-handling`）+ `site-directory` 总目录 + **资源站知识卡与专用下载器卡**（`site-bilibili-bbdown`、`site-videos-yt-dlp`、`site-annas-archive`、`site-project-gutenberg`、`site-open-access-papers`、`site-huggingface-datasets`、`site-littleskin` 等） |
+| `.dsh/skills/*.md` | **19 个 DSH 技能卡**（可用，旧版 5 张已按规范删除）：通用 6 个（`resource-download`、`find-and-resolve-sources`、`write-and-run-crawler`、`download-and-verify`、`site-memory`、`captcha-handling`）+ `site-directory` 总目录 + **资源站知识卡与专用下载器卡**（`site-bilibili-bbdown`、`site-videos-yt-dlp`、`site-gdgame`、`site-haowallpaper`、`site-annas-archive`、`site-project-gutenberg`、`site-open-access-papers`、`site-huggingface-datasets`、`site-littleskin` 等） |
 | `plugin/` | cordis 工具插件 `rd-tools`：`run_code`、`http_fetch`、`web_search`、`download_file`（断点续传）、`download_hls`（m3u8/AES-128）、`probe_file`（魔数/哈希验证）、`browser`（可选：Python playwright 通用浏览器自动化：持久会话/登录/反爬/点击下载/导 Cookie/验证码识别）、`memory_remember`/`memory_query`（站点记忆与打分） |
 | `plugin/lib/` | 各工具独立实现 |
 | `plugin/tests/run.mjs` | 离线单测套件（本地 HTTP 夹具） |

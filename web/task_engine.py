@@ -8,6 +8,7 @@ import sqlite3
 import hashlib
 import zipfile
 import subprocess
+import shutil
 from typing import Dict, List, Optional, AsyncGenerator
 from web.models import TaskInfo, TaskStatus, DownloadRequest, DownloadType, ProbeResult
 
@@ -211,24 +212,27 @@ class TaskManager:
             return DownloadType.BILIBILI
         elif ".m3u8" in t:
             return DownloadType.HLS
-        elif "annas-archive" in t or "libgen" in t or t.endswith(".epub") or t.endswith(".pdf"):
-            return DownloadType.ANNAS_ARCHIVE
         elif t.startswith("http://") or t.startswith("https://"):
+            # URL: only book-library domains get the book semantics; everything else is a direct file
+            if "annas-archive" in t or "libgen" in t or "/md5/" in t or "/slow_download/" in t:
+                return DownloadType.ANNAS_ARCHIVE
             return DownloadType.DIRECT
         else:
-            # Default to Anna's Archive book search if query is non-URL text
-            return DownloadType.ANNAS_ARCHIVE
+            # Free-text query: NOT a book by default — an agent task (DSH decides intent,
+            # e.g. "pvp材质包" -> Modrinth, not Anna's). Fixes the old hardcoded-annas trap.
+            return DownloadType.QUERY
 
     async def submit_task(self, req: DownloadRequest) -> TaskInfo:
         dtype = self.detect_type(req.url_or_query, req.download_type)
         task_id = str(uuid.uuid4())[:8]
         
         skill_names = {
-            DownloadType.YOUTUBE: "site-videos-yt-dlp",
-            DownloadType.BILIBILI: "site-bilibili-bbdown",
-            DownloadType.ANNAS_ARCHIVE: "site-annas-archive",
-            DownloadType.HLS: "download_hls",
-            DownloadType.DIRECT: "download_file"
+            DownloadType.YOUTUBE: "yt-dlp (site-videos-yt-dlp)",
+            DownloadType.BILIBILI: "BBDown (site-bilibili-bbdown)",
+            DownloadType.ANNAS_ARCHIVE: "dsh-agent (site-annas-archive)",
+            DownloadType.QUERY: "dsh-agent (query)",
+            DownloadType.HLS: "ffmpeg-hls",
+            DownloadType.DIRECT: "curl-resume"
         }
         
         title = req.output_name or req.url_or_query[:60]
@@ -259,8 +263,8 @@ class TaskManager:
                 await self._exec_youtube(task, req, env)
             elif dtype == DownloadType.BILIBILI:
                 await self._exec_bilibili(task, req, env)
-            elif dtype == DownloadType.ANNAS_ARCHIVE:
-                await self._exec_annas_archive(task, req, env)
+            elif dtype in (DownloadType.ANNAS_ARCHIVE, DownloadType.QUERY):
+                await self._run_dsh_agent(task, req, env)
             elif dtype == DownloadType.HLS:
                 await self._exec_hls(task, req, env)
             else:
@@ -361,105 +365,78 @@ class TaskManager:
 
         await self._exec_process(task, cmd, env, parse_bbdown)
 
-    async def _exec_annas_archive(self, task: TaskInfo, req: DownloadRequest, env: dict):
-        out_dir = os.path.join(DEFAULT_DOWNLOAD_DIR, "books")
-        os.makedirs(out_dir, exist_ok=True)
-        task.logs.append(f"📚 检索 Anna's Archive 图书库: {req.url_or_query}")
-        task.progress = 10.0
+    async def _run_dsh_agent(self, task: TaskInfo, req: DownloadRequest, env: dict):
+        repo = BASE_DIR
+        task.logs.append("🧠 交给 DSH agent 执行（skills + 真实工具/CLI 桥）——不再用手写假脚本")
+        task.progress = 5.0
+        self.broadcast(task)
+        dl_dir = os.path.join(repo, "downloads")
+        os.makedirs(dl_dir, exist_ok=True)
+        scan_dirs = [dl_dir, DEFAULT_DOWNLOAD_DIR]
+        before = self._snapshot_files(scan_dirs)
+        dsh = shutil.which("dsh") or os.path.expanduser("~/.local/node/bin/dsh")
+        proc = await asyncio.create_subprocess_exec(
+            dsh, "--profile", "headless", self._dsh_prompt(req.url_or_query, repo, dl_dir),
+            cwd=repo, stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT, env=env)
+        while True:
+            raw = await proc.stdout.readline()
+            if not raw:
+                break
+            line = raw.decode("utf-8", "ignore").strip()
+            if not line:
+                continue
+            task.logs.append(line[-400:])
+            m = re.search(r"(STATUS|进度|progress)[：:]?\s*([\d.]+)%", line, re.I)
+            if m:
+                task.progress = min(99.0, float(m.group(2)))
+            task.logs = task.logs[-300:]
+            self.broadcast(task)
+        rc = await proc.wait()
+        task.logs.append(f"📄 DSH agent 退出码 {rc}")
+        new_files = self._find_new_files(before, scan_dirs)
+        if new_files:
+            picked = max(new_files, key=lambda fp: os.path.getsize(fp))
+            task.output_file = picked
+            task.title = os.path.basename(picked)
+            task.logs.append(f"📦 发现交付文件: {picked}")
+        elif rc != 0:
+            task.logs.append("❌ agent 异常退出，见上方输出")
         self.broadcast(task)
 
-        import httpx
-        query = req.url_or_query.strip()
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
-        }
+    @staticmethod
+    def _snapshot_files(dirs):
+        snap = {}
+        for d in dirs:
+            if not os.path.isdir(d):
+                continue
+            for root, _, files in os.walk(d):
+                for f in files:
+                    fp = os.path.join(root, f)
+                    try:
+                        snap[fp] = os.path.getmtime(fp)
+                    except OSError:
+                        pass
+        return snap
 
-        try:
-            async with httpx.AsyncClient(headers=headers, follow_redirects=True, timeout=25.0) as client:
-                task.logs.append("🔍 正在检索书籍匹配项...")
-                task.progress = 25.0
-                self.broadcast(task)
+    @staticmethod
+    def _find_new_files(before, dirs):
+        after = TaskManager._snapshot_files(dirs)
+        return [fp for fp in after if fp not in before or after[fp] > before[fp]]
 
-                search_url = f"https://annas-archive.gd/search?q={query}" if not query.startswith("http") else query
-                resp = await client.get(search_url)
-                if resp.status_code != 200:
-                    task.status = TaskStatus.FAILED
-                    task.error_message = f"检索失败 (HTTP {resp.status_code})。请直接输入具体文件的下载 URL。"
-                    task.logs.append(f"❌ {task.error_message}")
-                    self.broadcast(task)
-                    return
-
-                html = resp.text
-                md5_matches = list(dict.fromkeys(re.findall(r'/md5/([a-f0-9]{32})', html)))
-                if not md5_matches:
-                    task.status = TaskStatus.FAILED
-                    task.error_message = "未在 Anna's 图书库中找到匹配书籍。如需下载材质包或通用文件，请直接粘贴该文件的直链 URL。"
-                    task.logs.append(f"❌ {task.error_message}")
-                    self.broadcast(task)
-                    return
-
-                task.logs.append(f"✨ 找到 {len(md5_matches)} 个候选图书条目，正在解析高速直链...")
-                task.progress = 40.0
-                self.broadcast(task)
-
-                downloaded_file = None
-                for md5 in md5_matches[:4]:
-                    if downloaded_file:
-                        break
-                    md5_url = f"https://annas-archive.gd/md5/{md5}"
-                    m_resp = await client.get(md5_url)
-                    if m_resp.status_code != 200:
-                        continue
-
-                    # Look for fast/slow partner download links
-                    dl_links = re.findall(r'href=["\'](https?://[^"\']*(?:/anon/s/|\.epub|\.pdf|\.mobi)[^"\']*)["\']', m_resp.text)
-                    if not dl_links:
-                        # Try fast partner downloads
-                        dl_links = re.findall(r'href=["\'](/slow_download/[^"\']+)["\']', m_resp.text)
-                        dl_links = [f"https://annas-archive.gd{l}" for l in dl_links]
-
-                    for direct_url in dl_links[:3]:
-                        task.logs.append(f"⚡ 解析到下载节点: {direct_url[:60]}...")
-                        task.progress = 60.0
-                        self.broadcast(task)
-
-                        safe_name = re.sub(r'[^\w\-\.\u4e00-\u9fa5]', '_', query)[:40]
-                        target_file = os.path.join(out_dir, f"{safe_name}.epub")
-                        
-                        # Use curl to download
-                        p = await asyncio.create_subprocess_exec(
-                            'curl', '-L', '--max-time', '60',
-                            '-A', headers['User-Agent'],
-                            '-o', target_file, direct_url,
-                            stdout=asyncio.subprocess.PIPE,
-                            stderr=asyncio.subprocess.PIPE
-                        )
-                        await p.communicate()
-                        if os.path.exists(target_file) and os.path.getsize(target_file) > 1024:
-                            downloaded_file = target_file
-                            break
-
-                if downloaded_file:
-                    task.output_file = downloaded_file
-                    task.title = os.path.basename(downloaded_file)
-                    task.progress = 100.0
-                    task.status = TaskStatus.COMPLETED
-                    task.completed_at = time.time()
-                    task.probe = self.probe_file_integrity(downloaded_file)
-                    task.logs.append(f"🎉 成功下载图书: {downloaded_file}")
-                    self.broadcast(task)
-                else:
-                    task.status = TaskStatus.FAILED
-                    task.error_message = "未能获取到可用的直链，源站节点响应超时或需过盾。建议直接粘贴直链 URL。"
-                    task.logs.append(f"❌ {task.error_message}")
-                    self.broadcast(task)
-
-        except Exception as e:
-            task.status = TaskStatus.FAILED
-            task.error_message = f"检索与下载异常: {str(e)}"
-            task.logs.append(f"❌ {task.error_message}")
-            self.broadcast(task)
+    @staticmethod
+    def _dsh_prompt(request: str, repo: str, dl_dir: str) -> str:
+        return (
+            "你是 Resources Downloader 的执行 agent，当前工作目录是 " + repo +
+            "（其 .dsh/skills 技能与 docs 规范可参考）。用户请求：" + (request or "")[:600] +
+            "\n要求：按 .dsh/skills 的方法真实完成并交付文件到下载目录 " + dl_dir + "。"
+            "若你无法直接调用 download_file/probe_file（本会话可能未挂 rd-tools 插件），"
+            "就用 bash 运行等价的真实 CLI 桥：cd " + repo +
+            " && node plugin/tests/e2e.mjs download '{\"url\":\"<URL>\",\"outDir\":\"" + dl_dir + "\"}'"
+            "（验证用 e2e.mjs probe）。视频/图书/学术等按 site-* 技能与真实本机工具处理。"
+            "禁止假装成功：拿不到文件就明确说明障碍。最后一行输出："
+            'FINAL_JSON:{"path":"绝对路径","size":N,"note":"说明"} 或 FINAL_JSON:{"error":"原因"}'
+        )
 
     async def _exec_direct(self, task: TaskInfo, req: DownloadRequest, env: dict):
         out_dir = os.path.join(DEFAULT_DOWNLOAD_DIR, "files")
