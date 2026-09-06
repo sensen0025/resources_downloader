@@ -24,3 +24,4 @@ github_deploy_key*
 # 系统
 .DS_Store
 Thumbs.db
+web/tasks.db

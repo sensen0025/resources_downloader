@@ -1,0 +1,631 @@
+<!DOCTYPE html>
+<html lang="zh-CN" class="dark">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Resources Downloader — 全能下载控制台</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://unpkg.com/lucide@latest"></script>
+  <script>
+    tailwind.config = {
+      darkMode: 'class',
+      theme: {
+        extend: {
+          colors: {
+            brand: {
+              50: '#f0fdf4',
+              500: '#22c55e',
+              600: '#16a34a',
+              700: '#15803d',
+              900: '#14532d',
+            },
+            darkbg: '#0f172a',
+            cardbg: '#1e293b',
+          }
+        }
+      }
+    }
+  </script>
+  <style>
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap');
+    body { font-family: 'Inter', -apple-system, sans-serif; }
+    code, pre { font-family: 'JetBrains Mono', monospace; }
+    .glass-panel {
+      background: rgba(30, 41, 59, 0.7);
+      backdrop-filter: blur(16px);
+      border: 1px solid rgba(255, 255, 255, 0.08);
+    }
+    .custom-scroll::-webkit-scrollbar { width: 6px; height: 6px; }
+    .custom-scroll::-webkit-scrollbar-thumb { background: #334155; border-radius: 4px; }
+    .custom-scroll::-webkit-scrollbar-track { background: transparent; }
+  </style>
+</head>
+<body class="bg-slate-950 text-slate-100 min-h-screen flex flex-col selection:bg-brand-500 selection:text-white">
+
+  <!-- Header -->
+  <header class="border-b border-slate-800 bg-slate-900/80 backdrop-blur sticky top-0 z-40">
+    <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 h-16 flex items-center justify-between">
+      <div class="flex items-center space-x-3">
+        <div class="w-10 h-10 rounded-xl bg-gradient-to-tr from-brand-600 to-emerald-400 flex items-center justify-center shadow-lg shadow-brand-500/20">
+          <i data-lucide="download-cloud" class="w-6 h-6 text-white"></i>
+        </div>
+        <div>
+          <h1 class="text-lg font-bold tracking-tight bg-gradient-to-r from-white via-slate-200 to-slate-400 bg-clip-text text-transparent">
+            Resources Downloader
+          </h1>
+          <div class="flex items-center space-x-2 text-xs text-slate-400">
+            <span class="inline-flex items-center text-emerald-400 font-mono">
+              <span class="w-2 h-2 rounded-full bg-emerald-400 animate-pulse mr-1.5"></span>
+              web.web.sensenx.com
+            </span>
+            <span>•</span>
+            <span id="header-status">DSH 技能网关在线</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- Nav Tabs -->
+      <nav class="flex space-x-1 bg-slate-800/60 p-1 rounded-xl border border-slate-700/50">
+        <button onclick="switchTab('download')" id="tab-btn-download" class="tab-btn px-4 py-1.5 rounded-lg text-sm font-medium transition flex items-center space-x-2 bg-brand-600 text-white shadow">
+          <i data-lucide="plus-circle" class="w-4 h-4"></i>
+          <span>新建任务</span>
+        </button>
+        <button onclick="switchTab('tasks')" id="tab-btn-tasks" class="tab-btn px-4 py-1.5 rounded-lg text-sm font-medium transition flex items-center space-x-2 text-slate-400 hover:text-slate-200">
+          <i data-lucide="activity" class="w-4 h-4"></i>
+          <span>实时任务</span>
+          <span id="badge-active-tasks" class="hidden px-1.5 py-0.2 text-xs bg-brand-500 text-slate-950 font-bold rounded-full">0</span>
+        </button>
+        <button onclick="switchTab('files')" id="tab-btn-files" class="tab-btn px-4 py-1.5 rounded-lg text-sm font-medium transition flex items-center space-x-2 text-slate-400 hover:text-slate-200">
+          <i data-lucide="folder-check" class="w-4 h-4"></i>
+          <span>媒体库与产物</span>
+        </button>
+        <button onclick="switchTab('system')" id="tab-btn-system" class="tab-btn px-4 py-1.5 rounded-lg text-sm font-medium transition flex items-center space-x-2 text-slate-400 hover:text-slate-200">
+          <i data-lucide="cpu" class="w-4 h-4"></i>
+          <span>环境监控</span>
+        </button>
+      </nav>
+    </div>
+  </header>
+
+  <!-- Main Content -->
+  <main class="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 py-8">
+
+    <!-- Tab 1: 新建与提交下载 -->
+    <div id="tab-download" class="tab-content block space-y-8">
+      
+      <!-- Hero Input Card -->
+      <div class="glass-panel p-6 sm:p-8 rounded-2xl shadow-2xl relative overflow-hidden border border-slate-700/60">
+        <div class="absolute -top-24 -right-24 w-80 h-80 bg-brand-500/10 rounded-full blur-3xl pointer-events-none"></div>
+        <div class="max-w-3xl">
+          <div class="inline-flex items-center space-x-2 px-3 py-1 rounded-full bg-slate-800 text-slate-300 text-xs font-mono mb-4 border border-slate-700">
+            <i data-lucide="sparkles" class="w-3.5 h-3.5 text-brand-400"></i>
+            <span>自动识别：B站 · YouTube · Anna's Archive · HLS流 · 直链</span>
+          </div>
+          <h2 class="text-2xl sm:text-3xl font-extrabold tracking-tight text-white mb-3">
+            输入任何 URL、视频或图书关键词
+          </h2>
+          <p class="text-slate-400 text-sm mb-6">
+            系统将自动调用最佳 DSH 专用技能（BBDown / yt-dlp / DDoS-Guard 逆向过盾 / Range 并发），一键抓取并探针校验。
+          </p>
+
+          <form id="download-form" onsubmit="handleDownloadSubmit(event)" class="space-y-4">
+            <div class="relative">
+              <input 
+                type="text" 
+                id="input-url" 
+                required
+                placeholder="粘贴视频 URL (YouTube / Bilibili / m3u8) 或输入书名 (如：Python Crash Course)" 
+                class="w-full pl-4 pr-32 py-4 bg-slate-900/90 border border-slate-700 rounded-xl text-slate-100 placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-brand-500 focus:border-transparent text-base transition shadow-inner font-sans"
+              />
+              <button 
+                type="submit" 
+                id="btn-submit"
+                class="absolute right-2 top-2 bottom-2 px-6 bg-gradient-to-r from-brand-600 to-emerald-500 hover:from-brand-500 hover:to-emerald-400 text-white font-semibold rounded-lg shadow-lg shadow-brand-500/25 flex items-center space-x-2 transition disabled:opacity-50"
+              >
+                <i data-lucide="zap" class="w-4 h-4"></i>
+                <span>立即下载</span>
+              </button>
+            </div>
+
+            <!-- Options Accordion -->
+            <div class="pt-2 flex flex-wrap gap-4 text-xs">
+              <div class="flex items-center space-x-2 bg-slate-900/60 px-3 py-2 rounded-lg border border-slate-800">
+                <span class="text-slate-400">下载类型:</span>
+                <select id="select-type" class="bg-slate-800 text-slate-200 border-none rounded px-2 py-1 focus:ring-1 focus:ring-brand-500">
+                  <option value="auto">智能自动识别</option>
+                  <option value="youtube">YouTube (yt-dlp)</option>
+                  <option value="bilibili">哔哩哔哩 (BBDown)</option>
+                  <option value="annas_archive">Anna's Archive (电子书)</option>
+                  <option value="direct">HTTP/HTTPS 直链</option>
+                  <option value="hls">HLS/m3u8 视频流</option>
+                </select>
+              </div>
+
+              <div class="flex items-center space-x-2 bg-slate-900/60 px-3 py-2 rounded-lg border border-slate-800">
+                <span class="text-slate-400">音视频选项:</span>
+                <select id="select-format" class="bg-slate-800 text-slate-200 border-none rounded px-2 py-1 focus:ring-1 focus:ring-brand-500">
+                  <option value="best">最高画质 + 最佳音频 (MP4)</option>
+                  <option value="audio_only">仅抽取音频 (MP3/M4A 320k)</option>
+                </select>
+              </div>
+
+              <label class="flex items-center space-x-2 bg-slate-900/60 px-3 py-2 rounded-lg border border-slate-800 cursor-pointer text-slate-300">
+                <input type="checkbox" id="check-subtitles" class="rounded bg-slate-800 border-slate-700 text-brand-500 focus:ring-brand-500">
+                <span>抽取中英双语字幕</span>
+              </label>
+
+              <div class="flex items-center space-x-2 bg-slate-900/60 px-3 py-2 rounded-lg border border-slate-800 flex-1 min-w-[200px]">
+                <span class="text-slate-400">重命名(可选):</span>
+                <input type="text" id="input-custom-name" placeholder="默认使用原始标题" class="bg-transparent border-none text-slate-200 w-full focus:outline-none placeholder-slate-600">
+              </div>
+            </div>
+          </form>
+        </div>
+      </div>
+
+      <!-- Quick Shortcuts Section -->
+      <div class="grid grid-cols-1 md:grid-cols-3 gap-6">
+        <div class="glass-panel p-5 rounded-xl border border-slate-800/80 hover:border-slate-700 transition">
+          <div class="flex items-center space-x-3 mb-2">
+            <div class="p-2 rounded-lg bg-red-500/10 text-red-400"><i data-lucide="youtube" class="w-5 h-5"></i></div>
+            <h3 class="font-semibold text-slate-200">YouTube / 千站视频</h3>
+          </div>
+          <p class="text-xs text-slate-400 mb-3">支持 4K 60fps AV1/VP9 无损合流、时间截取、多语言字幕抽取与播放列表批量下。</p>
+          <div class="text-[11px] font-mono text-emerald-400 flex items-center"><i data-lucide="check" class="w-3 h-3 mr-1"></i> yt-dlp + Node 解密就绪</div>
+        </div>
+
+        <div class="glass-panel p-5 rounded-xl border border-slate-800/80 hover:border-slate-700 transition">
+          <div class="flex items-center space-x-3 mb-2">
+            <div class="p-2 rounded-lg bg-pink-500/10 text-pink-400"><i data-lucide="play-square" class="w-5 h-5"></i></div>
+            <h3 class="font-semibold text-slate-200">哔哩哔哩 (B站)</h3>
+          </div>
+          <p class="text-xs text-slate-400 mb-3">支持 BV/AV 号、番剧合集、分P下载、弹幕抽取与 ffmpeg 极速混流落地。</p>
+          <div class="text-[11px] font-mono text-emerald-400 flex items-center"><i data-lucide="check" class="w-3 h-3 mr-1"></i> BBDown v1.6.3 原生就绪</div>
+        </div>
+
+        <div class="glass-panel p-5 rounded-xl border border-slate-800/80 hover:border-slate-700 transition">
+          <div class="flex items-center space-x-3 mb-2">
+            <div class="p-2 rounded-lg bg-blue-500/10 text-blue-400"><i data-lucide="book-open" class="w-5 h-5"></i></div>
+            <h3 class="font-semibold text-slate-200">Anna's Archive 图书</h3>
+          </div>
+          <p class="text-xs text-slate-400 mb-3">支持输入书名或 MD5，Playwright 无感突破 DDoS-Guard 并提取合作直链。</p>
+          <div class="text-[11px] font-mono text-emerald-400 flex items-center"><i data-lucide="check" class="w-3 h-3 mr-1"></i> annas-archive.gd 逆向闭环</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Tab 2: 实时任务列表与终端 -->
+    <div id="tab-tasks" class="tab-content hidden space-y-6">
+      <div class="flex items-center justify-between mb-4">
+        <div>
+          <h2 class="text-xl font-bold text-white">下载任务看板</h2>
+          <p class="text-xs text-slate-400">实时 SSE 管道更新，零轮询延迟</p>
+        </div>
+        <button onclick="loadTasks()" class="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-xs text-slate-300 flex items-center space-x-1.5 border border-slate-700">
+          <i data-lucide="refresh-cw" class="w-3.5 h-3.5"></i>
+          <span>刷新</span>
+        </button>
+      </div>
+
+      <div id="tasks-container" class="space-y-4">
+        <!-- Dynamic Tasks will render here -->
+        <div class="text-center py-12 text-slate-500 text-sm">暂无任务</div>
+      </div>
+    </div>
+
+    <!-- Tab 3: 媒体库与文件产物 -->
+    <div id="tab-files" class="tab-content hidden space-y-6">
+      <div class="flex items-center justify-between mb-4">
+        <div>
+          <h2 class="text-xl font-bold text-white">下载产物媒体库</h2>
+          <p class="text-xs text-slate-400">存储目录: <code class="text-emerald-400">/home/sensen/Downloads/</code></p>
+        </div>
+        <button onclick="loadFiles()" class="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-xs text-slate-300 flex items-center space-x-1.5 border border-slate-700">
+          <i data-lucide="refresh-cw" class="w-3.5 h-3.5"></i>
+          <span>刷新文件</span>
+        </button>
+      </div>
+
+      <div id="files-grid" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+        <!-- Dynamic Files will render here -->
+      </div>
+    </div>
+
+    <!-- Tab 4: 技能矩阵与环境监控 -->
+    <div id="tab-system" class="tab-content hidden space-y-6">
+      <div class="mb-4">
+        <h2 class="text-xl font-bold text-white">环境运行状态与技能就绪矩阵</h2>
+        <p class="text-xs text-slate-400">系统底层执行工具与 17 个 DSH 知识卡就绪情况</p>
+      </div>
+
+      <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+        <!-- System Health Card -->
+        <div class="glass-panel p-6 rounded-xl border border-slate-800 space-y-4">
+          <h3 class="text-sm font-semibold text-slate-200 flex items-center">
+            <i data-lucide="server" class="w-4 h-4 mr-2 text-brand-400"></i>
+            底层执行依赖状态
+          </h3>
+          <div id="system-tools-list" class="space-y-3 font-mono text-xs">
+            <!-- Dynamic Tools -->
+          </div>
+        </div>
+
+        <!-- Disk & Tunnel Info -->
+        <div class="glass-panel p-6 rounded-xl border border-slate-800 space-y-4">
+          <h3 class="text-sm font-semibold text-slate-200 flex items-center">
+            <i data-lucide="hard-drive" class="w-4 h-4 mr-2 text-brand-400"></i>
+            存储与公网穿透
+          </h3>
+          <div id="system-disk-info" class="space-y-3 text-xs">
+            <!-- Disk Info -->
+          </div>
+        </div>
+      </div>
+    </div>
+
+  </main>
+
+  <!-- Probe Inspection Modal -->
+  <div id="probe-modal" class="fixed inset-0 bg-black/80 backdrop-blur-sm z-50 hidden flex items-center justify-center p-4">
+    <div class="glass-panel max-w-2xl w-full p-6 rounded-2xl border border-slate-700 shadow-2xl space-y-4">
+      <div class="flex items-center justify-between border-b border-slate-800 pb-3">
+        <div class="flex items-center space-x-2">
+          <i data-lucide="binary" class="w-5 h-5 text-brand-400"></i>
+          <h3 class="font-bold text-slate-100" id="probe-modal-title">文件完整性探针检测</h3>
+        </div>
+        <button onclick="closeProbeModal()" class="text-slate-400 hover:text-white"><i data-lucide="x" class="w-5 h-5"></i></button>
+      </div>
+      <div class="space-y-3 font-mono text-xs text-slate-300" id="probe-modal-content">
+        <!-- Dynamic probe content -->
+      </div>
+    </div>
+  </div>
+
+  <!-- Media Player Modal -->
+  <div id="player-modal" class="fixed inset-0 bg-black/90 backdrop-blur-md z-50 hidden flex items-center justify-center p-4">
+    <div class="max-w-4xl w-full bg-slate-900 border border-slate-800 rounded-2xl overflow-hidden shadow-2xl flex flex-col">
+      <div class="flex items-center justify-between px-4 py-3 border-b border-slate-800 bg-slate-950">
+        <span class="text-xs font-semibold text-slate-200 truncate" id="player-title">在线播放</span>
+        <button onclick="closePlayerModal()" class="text-slate-400 hover:text-white"><i data-lucide="x" class="w-5 h-5"></i></button>
+      </div>
+      <div class="relative bg-black flex items-center justify-center min-h-[360px]" id="player-container">
+        <!-- Dynamic Video / Audio Player -->
+      </div>
+    </div>
+  </div>
+
+  <script>
+    let currentTab = 'download';
+    let tasksMap = {};
+
+    function switchTab(tab) {
+      currentTab = tab;
+      document.querySelectorAll('.tab-content').forEach(el => el.classList.add('hidden'));
+      document.querySelectorAll('.tab-btn').forEach(btn => {
+        btn.classList.remove('bg-brand-600', 'text-white', 'shadow');
+        btn.classList.add('text-slate-400');
+      });
+
+      document.getElementById(`tab-${tab}`).classList.remove('hidden');
+      const activeBtn = document.getElementById(`tab-btn-${tab}`);
+      activeBtn.classList.add('bg-brand-600', 'text-white', 'shadow');
+      activeBtn.classList.remove('text-slate-400');
+
+      if (tab === 'tasks') loadTasks();
+      if (tab === 'files') loadFiles();
+      if (tab === 'system') loadSystemInfo();
+      lucide.createIcons();
+    }
+
+    async function handleDownloadSubmit(e) {
+      e.preventDefault();
+      const url = document.getElementById('input-url').value.trim();
+      if (!url) return;
+
+      const btn = document.getElementById('btn-submit');
+      btn.disabled = true;
+      btn.innerHTML = `<i data-lucide="loader-2" class="w-4 h-4 animate-spin"></i><span>提交中...</span>`;
+      lucide.createIcons();
+
+      try {
+        const payload = {
+          url_or_query: url,
+          download_type: document.getElementById('select-type').value,
+          format_option: document.getElementById('select-format').value,
+          subtitles: document.getElementById('check-subtitles').checked,
+          output_name: document.getElementById('input-custom-name').value.trim() || null
+        };
+
+        const res = await fetch('/api/v1/download', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify(payload)
+        });
+        const data = await res.json();
+        
+        document.getElementById('input-url').value = '';
+        switchTab('tasks');
+      } catch (err) {
+        alert("提交任务失败: " + err);
+      } finally {
+        btn.disabled = false;
+        btn.innerHTML = `<i data-lucide="zap" class="w-4 h-4"></i><span>立即下载</span>`;
+        lucide.createIcons();
+      }
+    }
+
+    async function loadTasks() {
+      try {
+        const res = await fetch('/api/v1/tasks');
+        const tasks = await res.json();
+        tasks.forEach(t => tasksMap[t.id] = t);
+        renderTasksList();
+      } catch (e) {
+        console.error("Load tasks error:", e);
+      }
+    }
+
+    function renderTasksList() {
+      const container = document.getElementById('tasks-container');
+      const tasks = Object.values(tasksMap).sort((a,b) => b.created_at - a.created_at);
+      
+      const activeCount = tasks.filter(t => t.status === 'running').length;
+      const badge = document.getElementById('badge-active-tasks');
+      if (activeCount > 0) {
+        badge.innerText = activeCount;
+        badge.classList.remove('hidden');
+      } else {
+        badge.classList.add('hidden');
+      }
+
+      if (tasks.length === 0) {
+        container.innerHTML = `<div class="text-center py-16 text-slate-500 text-sm">暂无任务，在上方提交您的第一个下载！</div>`;
+        return;
+      }
+
+      container.innerHTML = tasks.map(t => {
+        const isRunning = t.status === 'running';
+        const isSuccess = t.status === 'completed';
+        const isFailed = t.status === 'failed';
+        
+        const statusBadge = isRunning 
+          ? `<span class="px-2.5 py-1 text-xs rounded-full bg-blue-500/10 text-blue-400 font-mono flex items-center"><i data-lucide="loader-2" class="w-3 h-3 mr-1 animate-spin"></i>下载中</span>`
+          : isSuccess
+          ? `<span class="px-2.5 py-1 text-xs rounded-full bg-emerald-500/10 text-emerald-400 font-mono flex items-center"><i data-lucide="check-circle" class="w-3 h-3 mr-1"></i>已完成</span>`
+          : `<span class="px-2.5 py-1 text-xs rounded-full bg-red-500/10 text-red-400 font-mono flex items-center"><i data-lucide="alert-circle" class="w-3 h-3 mr-1"></i>失败</span>`;
+
+        return `
+          <div class="glass-panel p-5 rounded-xl border border-slate-800 space-y-3">
+            <div class="flex items-start justify-between">
+              <div class="space-y-1 max-w-[80%]">
+                <div class="flex items-center space-x-2">
+                  <span class="text-xs px-2 py-0.5 rounded bg-slate-800 text-slate-400 font-mono">${t.skill_used}</span>
+                  <h3 class="font-semibold text-slate-100 truncate">${t.title || t.url_or_query}</h3>
+                </div>
+                <div class="text-xs text-slate-400 truncate">${t.url_or_query}</div>
+              </div>
+              <div class="flex items-center space-x-2">
+                ${statusBadge}
+              </div>
+            </div>
+
+            <!-- Progress Bar -->
+            <div class="space-y-1.5">
+              <div class="flex items-center justify-between text-xs font-mono text-slate-400">
+                <span>进度: ${t.progress.toFixed(1)}%</span>
+                <span>${t.speed_text || ''} ${t.eta_text ? '· 剩余 ' + t.eta_text : ''}</span>
+              </div>
+              <div class="w-full bg-slate-900 rounded-full h-2.5 overflow-hidden border border-slate-800">
+                <div class="h-full bg-gradient-to-r from-brand-600 to-emerald-400 transition-all duration-300" style="width: ${Math.max(t.progress, isRunning ? 5 : 0)}%"></div>
+              </div>
+            </div>
+
+            <!-- Logs / Output -->
+            <div class="pt-2 flex items-center justify-between text-xs">
+              <button onclick="toggleLogs('${t.id}')" class="text-slate-400 hover:text-slate-200 flex items-center space-x-1">
+                <i data-lucide="terminal" class="w-3.5 h-3.5"></i>
+                <span>查看实时终端输出 (${t.logs ? t.logs.length : 0} 行)</span>
+              </button>
+              ${t.output_file ? `
+                <div class="flex items-center space-x-2">
+                  <button onclick="openProbeModal('${encodeURIComponent(t.output_file)}')" class="px-2.5 py-1 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded flex items-center space-x-1">
+                    <i data-lucide="binary" class="w-3 h-3 text-brand-400"></i>
+                    <span>探针校验</span>
+                  </button>
+                </div>
+              ` : ''}
+            </div>
+
+            <div id="logs-${t.id}" class="hidden bg-black/60 p-3 rounded-lg border border-slate-900 text-slate-300 font-mono text-[11px] max-h-48 overflow-y-auto custom-scroll space-y-1">
+              ${(t.logs || []).map(l => `<div>${l}</div>`).join('') || '<div class="text-slate-600">等待输出...</div>'}
+            </div>
+          </div>
+        `;
+      }).join('');
+      lucide.createIcons();
+    }
+
+    function toggleLogs(id) {
+      const el = document.getElementById(`logs-${id}`);
+      if (el) el.classList.toggle('hidden');
+    }
+
+    async function loadFiles() {
+      try {
+        const res = await fetch('/api/v1/files');
+        const files = await res.json();
+        const grid = document.getElementById('files-grid');
+
+        if (files.length === 0) {
+          grid.innerHTML = `<div class="col-span-full text-center py-16 text-slate-500 text-sm">下载目录为空</div>`;
+          return;
+        }
+
+        grid.innerHTML = files.map(f => {
+          const isVideo = f.mime_type.startsWith('video/');
+          const isAudio = f.mime_type.startsWith('audio/');
+          const isPDF = f.mime_type.includes('pdf');
+          const isEPUB = f.name.endsWith('.epub');
+          const mbSize = (f.size / (1024 * 1024)).toFixed(2);
+
+          return `
+            <div class="glass-panel p-4 rounded-xl border border-slate-800 space-y-3 flex flex-col justify-between hover:border-slate-700 transition">
+              <div class="space-y-2">
+                <div class="flex items-center justify-between text-xs">
+                  <span class="px-2 py-0.5 rounded bg-brand-500/10 text-brand-400 font-mono">${f.format_name}</span>
+                  <span class="text-slate-400 font-mono">${mbSize} MB</span>
+                </div>
+                <h4 class="font-medium text-slate-100 text-sm break-all line-clamp-2" title="${f.name}">${f.name}</h4>
+              </div>
+
+              <div class="pt-2 border-t border-slate-800 flex items-center justify-between text-xs">
+                <button onclick="openProbeModal('${encodeURIComponent(f.full_path)}')" class="text-slate-400 hover:text-slate-200 flex items-center space-x-1 font-mono">
+                  <i data-lucide="binary" class="w-3.5 h-3.5 text-brand-400"></i>
+                  <span>探针</span>
+                </button>
+
+                <div class="flex items-center space-x-2">
+                  ${(isVideo || isAudio) ? `
+                    <button onclick="openPlayerModal('${encodeURIComponent(f.rel_path)}', '${encodeURIComponent(f.name)}', '${isVideo ? 'video' : 'audio'}')" class="px-2.5 py-1 bg-brand-600 hover:bg-brand-500 text-white rounded flex items-center space-x-1 shadow">
+                      <i data-lucide="play" class="w-3 h-3"></i>
+                      <span>播放</span>
+                    </button>
+                  ` : ''}
+                  <a href="/api/v1/files/download/${encodeURIComponent(f.rel_path)}" download class="px-2.5 py-1 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded flex items-center space-x-1">
+                    <i data-lucide="download" class="w-3 h-3"></i>
+                    <span>下载</span>
+                  </a>
+                </div>
+              </div>
+            </div>
+          `;
+        }).join('');
+        lucide.createIcons();
+      } catch (e) {
+        console.error("Load files error:", e);
+      }
+    }
+
+    async function openProbeModal(encodedPath) {
+      const modal = document.getElementById('probe-modal');
+      const content = document.getElementById('probe-modal-content');
+      modal.classList.remove('hidden');
+      content.innerHTML = `<div class="py-8 text-center"><i data-lucide="loader-2" class="w-6 h-6 animate-spin mx-auto text-brand-400"></i><p class="mt-2 text-xs text-slate-400">正在执行魔数与 SHA-256 探针检验...</p></div>`;
+      lucide.createIcons();
+
+      try {
+        const res = await fetch(`/api/v1/probe?path=${encodedPath}`);
+        const p = await res.json();
+        content.innerHTML = `
+          <div class="space-y-2.5">
+            <div class="flex justify-between py-1 border-b border-slate-800"><span class="text-slate-500">文件名:</span><span class="text-slate-200">${p.file_name}</span></div>
+            <div class="flex justify-between py-1 border-b border-slate-800"><span class="text-slate-500">文件大小:</span><span class="text-slate-200">${p.file_size} 字节 (${(p.file_size/1024/1024).toFixed(3)} MB)</span></div>
+            <div class="flex justify-between py-1 border-b border-slate-800"><span class="text-slate-500">格式识别:</span><span class="text-emerald-400 font-bold">${p.format_name} (${p.mime_type})</span></div>
+            <div class="flex justify-between py-1 border-b border-slate-800"><span class="text-slate-500">文件魔数 (Magic Hex):</span><span class="text-yellow-400">${p.magic_hex}</span></div>
+            <div class="flex justify-between py-1 border-b border-slate-800"><span class="text-slate-500">完整性校验 (is_valid):</span><span class="${p.is_valid ? 'text-emerald-400' : 'text-red-400'} font-bold">${p.is_valid ? '✅ VALID' : '❌ CORRUPTED'}</span></div>
+            <div class="flex flex-col py-1 border-b border-slate-800"><span class="text-slate-500 mb-1">SHA-256 哈希:</span><span class="text-[11px] text-slate-300 break-all bg-slate-900 p-2 rounded">${p.sha256}</span></div>
+            ${p.sample_info ? `<div class="py-1"><span class="text-slate-500">结构详情:</span><p class="text-slate-400 mt-1">${p.sample_info}</p></div>` : ''}
+          </div>
+        `;
+      } catch (e) {
+        content.innerHTML = `<div class="text-red-400">探针校验执行失败: ${e}</div>`;
+      }
+    }
+
+    function closeProbeModal() {
+      document.getElementById('probe-modal').classList.add('hidden');
+    }
+
+    function openPlayerModal(relPath, fileName, type) {
+      const modal = document.getElementById('player-modal');
+      const container = document.getElementById('player-container');
+      const title = document.getElementById('player-title');
+      
+      title.innerText = decodeURIComponent(fileName);
+      const streamUrl = `/api/v1/files/stream/${relPath}`;
+
+      if (type === 'video') {
+        container.innerHTML = `<video src="${streamUrl}" controls autoplay class="w-full max-h-[70vh] rounded-b-2xl focus:outline-none"></video>`;
+      } else {
+        container.innerHTML = `
+          <div class="p-8 text-center space-y-4 w-full">
+            <div class="w-16 h-16 rounded-full bg-brand-500/20 text-brand-400 mx-auto flex items-center justify-center animate-pulse"><i data-lucide="music" class="w-8 h-8"></i></div>
+            <audio src="${streamUrl}" controls autoplay class="w-full focus:outline-none"></audio>
+          </div>
+        `;
+      }
+      modal.classList.remove('hidden');
+      lucide.createIcons();
+    }
+
+    function closePlayerModal() {
+      const container = document.getElementById('player-container');
+      container.innerHTML = '';
+      document.getElementById('player-modal').classList.add('hidden');
+    }
+
+    async function loadSystemInfo() {
+      try {
+        const res = await fetch('/api/v1/system');
+        const data = await res.json();
+        
+        const toolsList = document.getElementById('system-tools-list');
+        toolsList.innerHTML = Object.entries(data.tools).map(([k, v]) => `
+          <div class="flex items-center justify-between p-2.5 bg-slate-900/80 rounded-lg border border-slate-800">
+            <span class="text-slate-300 font-semibold uppercase">${k}</span>
+            <span class="${v.installed ? 'text-emerald-400' : 'text-red-400'} flex items-center">
+              ${v.installed ? '✅ ' + v.version : '❌ 未就绪'}
+            </span>
+          </div>
+        `).join('');
+
+        const diskInfo = document.getElementById('system-disk-info');
+        diskInfo.innerHTML = `
+          <div class="space-y-3 font-mono">
+            <div class="flex justify-between"><span class="text-slate-400">公网绑定域名:</span><span class="text-emerald-400 font-bold">${data.domain}</span></div>
+            <div class="flex justify-between"><span class="text-slate-400">下载存储目录:</span><span class="text-slate-200">${data.download_dir}</span></div>
+            <div class="flex justify-between"><span class="text-slate-400">磁盘空间已用:</span><span class="text-slate-200">${data.disk.used_gb} GB / ${data.disk.total_gb} GB (${data.disk.percent_used}%)</span></div>
+            <div class="w-full bg-slate-900 rounded-full h-2 overflow-hidden border border-slate-800">
+              <div class="h-full bg-brand-500" style="width: ${data.disk.percent_used}%"></div>
+            </div>
+            <div class="flex justify-between pt-2 border-t border-slate-800 text-xs text-slate-400">
+              <span>运行中任务: ${data.active_tasks}</span>
+              <span>历史总任务: ${data.total_tasks}</span>
+            </div>
+          </div>
+        `;
+        lucide.createIcons();
+      } catch (e) {
+        console.error("Load system error:", e);
+      }
+    }
+
+    // Connect Global SSE Stream for real-time live events
+    function connectSSE() {
+      const eventSource = new EventSource('/api/v1/tasks/events');
+      eventSource.onmessage = (event) => {
+        try {
+          const task = JSON.parse(event.data);
+          tasksMap[task.id] = task;
+          if (currentTab === 'tasks') {
+            renderTasksList();
+          }
+        } catch (e) {
+          console.error("SSE parse error:", e);
+        }
+      };
+      eventSource.onerror = () => {
+        eventSource.close();
+        setTimeout(connectSSE, 3000);
+      };
+    }
+
+    // Initialize
+    document.addEventListener('DOMContentLoaded', () => {
+      lucide.createIcons();
+      loadTasks();
+      connectSSE();
+    });
+  </script>
+</body>
+</html>
