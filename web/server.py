@@ -170,10 +170,11 @@ async def direct_file_download(rel_path: str):
     )
 
 @app.get("/api/v1/system")
-async def system_status():
+async def system_status(request: Request):
     tools = {}
     env = os.environ.copy()
-    env["PATH"] = f"/home/sensen/bin:/home/sensen/.local/bin:{env.get('PATH', '')}"
+    user_bin = os.path.expanduser("~/.local/bin")
+    env["PATH"] = f"/usr/local/bin:{user_bin}:/home/sensen/bin:/home/sensen/.local/bin:{env.get('PATH', '')}"
     
     # Check BBDown
     try:
@@ -212,10 +213,13 @@ async def system_status():
 
     # Disk usage
     disk_total, disk_used, disk_free = shutil.disk_usage(DEFAULT_DOWNLOAD_DIR)
+    host = request.headers.get("host", "47.245.99.240")
+    proto = request.headers.get("x-forwarded-proto", "http")
+    domain = f"{proto}://{host}"
 
     return {
         "service": "resources_downloader",
-        "domain": "https://web.web.sensenx.com",
+        "domain": domain,
         "download_dir": DEFAULT_DOWNLOAD_DIR,
         "disk": {
             "total_gb": round(disk_total / (1024**3), 2),
