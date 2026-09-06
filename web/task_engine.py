@@ -364,100 +364,102 @@ class TaskManager:
     async def _exec_annas_archive(self, task: TaskInfo, req: DownloadRequest, env: dict):
         out_dir = os.path.join(DEFAULT_DOWNLOAD_DIR, "books")
         os.makedirs(out_dir, exist_ok=True)
-        task.logs.append(f"📚 启动 Anna's Archive 浏览器引擎过盾与检索: {req.url_or_query}")
+        task.logs.append(f"📚 检索 Anna's Archive 图书库: {req.url_or_query}")
+        task.progress = 10.0
         self.broadcast(task)
 
-        script = f"""
-from playwright.sync_api import sync_playwright
-import time, re, subprocess, os, json
+        import httpx
+        query = req.url_or_query.strip()
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+        }
 
-query = {json.dumps(req.url_or_query)}
-out_dir = {json.dumps(out_dir)}
+        try:
+            async with httpx.AsyncClient(headers=headers, follow_redirects=True, timeout=25.0) as client:
+                task.logs.append("🔍 正在检索书籍匹配项...")
+                task.progress = 25.0
+                self.broadcast(task)
 
-with sync_playwright() as p:
-    browser = p.chromium.launch(headless=True, args=['--no-sandbox', '--disable-blink-features=AutomationControlled'])
-    ctx = browser.new_context(user_agent="Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36")
-    ctx.add_init_script("Object.defineProperty(navigator,'webdriver',{{get:()=>undefined}})")
-    page = ctx.new_page()
+                search_url = f"https://annas-archive.gd/search?q={query}" if not query.startswith("http") else query
+                resp = await client.get(search_url)
+                if resp.status_code != 200:
+                    task.status = TaskStatus.FAILED
+                    task.error_message = f"检索失败 (HTTP {resp.status_code})。请直接输入具体文件的下载 URL。"
+                    task.logs.append(f"❌ {task.error_message}")
+                    self.broadcast(task)
+                    return
 
-    print("STATUS:10% 连接 Anna's Archive (https://annas-archive.gd/)...")
-    page.goto("https://annas-archive.gd/", timeout=35000)
-    page.wait_for_selector('input[name="q"]', timeout=20000)
-    print("STATUS:25% DDoS-Guard 校验通过，提交检索...")
+                html = resp.text
+                md5_matches = list(dict.fromkeys(re.findall(r'/md5/([a-f0-9]{32})', html)))
+                if not md5_matches:
+                    task.status = TaskStatus.FAILED
+                    task.error_message = "未在 Anna's 图书库中找到匹配书籍。如需下载材质包或通用文件，请直接粘贴该文件的直链 URL。"
+                    task.logs.append(f"❌ {task.error_message}")
+                    self.broadcast(task)
+                    return
 
-    if query.startswith("http://") or query.startswith("https://"):
-        page.goto(query, timeout=35000)
-    else:
-        with page.expect_navigation():
-            page.fill('input[name="q"]', query)
-            page.keyboard.press("Enter")
-    
-    for _ in range(12):
-        time.sleep(1.5)
-        if 'DDoS' not in page.title() and 'check=' not in page.url:
-            break
+                task.logs.append(f"✨ 找到 {len(md5_matches)} 个候选图书条目，正在解析高速直链...")
+                task.progress = 40.0
+                self.broadcast(task)
 
-    links = page.query_selector_all('a[href*="/md5/"]')
-    if not links:
-        print("ERROR: 未找到匹配电子书条目")
-        browser.close()
-        exit(1)
+                downloaded_file = None
+                for md5 in md5_matches[:4]:
+                    if downloaded_file:
+                        break
+                    md5_url = f"https://annas-archive.gd/md5/{md5}"
+                    m_resp = await client.get(md5_url)
+                    if m_resp.status_code != 200:
+                        continue
 
-    md5_list = []
-    for l in links[:6]:
-        h = l.get_attribute('href') or ''
-        if '/md5/' in h:
-            md5_list.append(h.split('/md5/')[-1].strip('/'))
+                    # Look for fast/slow partner download links
+                    dl_links = re.findall(r'href=["\'](https?://[^"\']*(?:/anon/s/|\.epub|\.pdf|\.mobi)[^"\']*)["\']', m_resp.text)
+                    if not dl_links:
+                        # Try fast partner downloads
+                        dl_links = re.findall(r'href=["\'](/slow_download/[^"\']+)["\']', m_resp.text)
+                        dl_links = [f"https://annas-archive.gd{l}" for l in dl_links]
 
-    print(f"STATUS:45% 发现 {{len(md5_list)}} 个候选 MD5，解析慢速节点直链...")
-    
-    downloaded_file = None
-    for md5 in md5_list:
-        if downloaded_file: break
-        for p_idx in range(8):
-            slow_url = f"https://annas-archive.gd/slow_download/{{md5}}/0/{{p_idx}}"
-            page.goto(slow_url, timeout=30000)
-            for _ in range(8):
-                time.sleep(1)
-                if 'DDoS' not in page.title() and 'Checking' not in page.title():
-                    break
-            
-            dl_a = page.query_selector_all('a[href*="anon/s/"], a[href*=".epub"], a[href*=".pdf"], a[href*=".mobi"]')
-            if dl_a:
-                direct_url = dl_a[0].get_attribute('href')
-                print(f"STATUS:70% 命中合作服务器 #{{p_idx}} 直链: {{direct_url[:60]}}...")
-                temp_bin = os.path.join(out_dir, "temp_book.bin")
-                if os.path.exists(temp_bin): os.remove(temp_bin)
-                subprocess.run([
-                    'curl', '-L', '--max-time', '60',
-                    '-A', 'Mozilla/5.0 (X11; Linux x86_64)',
-                    '-H', 'Referer: https://annas-archive.gd/',
-                    '-o', temp_bin, direct_url
-                ])
-                if os.path.exists(temp_bin) and os.path.getsize(temp_bin) > 1000:
-                    magic = open(temp_bin, 'rb').read(4).hex()
-                    ext = ".epub" if magic == "504b0304" else ".pdf" if magic.startswith("25504446") else ".bin"
-                    safe_name = re.sub(r'[^\\w\\-\\.\\u4e00-\\u9fa5]', '_', query)[:40] + ext
-                    final_path = os.path.join(out_dir, safe_name)
-                    os.rename(temp_bin, final_path)
-                    downloaded_file = final_path
-                    print(f"DELIVERABLE:{{final_path}}")
-                    break
-    browser.close()
-"""
-        cmd = ["python3", "-c", script]
-        
-        def parse_aa(line, t):
-            if line.startswith("STATUS:"):
-                m_pct = re.search(r'STATUS:(\d+)%', line)
-                if m_pct:
-                    t.progress = float(m_pct.group(1))
-            elif line.startswith("DELIVERABLE:"):
-                t.output_file = line.split("DELIVERABLE:")[-1].strip()
-                t.title = os.path.basename(t.output_file)
-                t.progress = 100.0
+                    for direct_url in dl_links[:3]:
+                        task.logs.append(f"⚡ 解析到下载节点: {direct_url[:60]}...")
+                        task.progress = 60.0
+                        self.broadcast(task)
 
-        await self._exec_process(task, cmd, env, parse_aa)
+                        safe_name = re.sub(r'[^\w\-\.\u4e00-\u9fa5]', '_', query)[:40]
+                        target_file = os.path.join(out_dir, f"{safe_name}.epub")
+                        
+                        # Use curl to download
+                        p = await asyncio.create_subprocess_exec(
+                            'curl', '-L', '--max-time', '60',
+                            '-A', headers['User-Agent'],
+                            '-o', target_file, direct_url,
+                            stdout=asyncio.subprocess.PIPE,
+                            stderr=asyncio.subprocess.PIPE
+                        )
+                        await p.communicate()
+                        if os.path.exists(target_file) and os.path.getsize(target_file) > 1024:
+                            downloaded_file = target_file
+                            break
+
+                if downloaded_file:
+                    task.output_file = downloaded_file
+                    task.title = os.path.basename(downloaded_file)
+                    task.progress = 100.0
+                    task.status = TaskStatus.COMPLETED
+                    task.completed_at = time.time()
+                    task.probe = self.probe_file_integrity(downloaded_file)
+                    task.logs.append(f"🎉 成功下载图书: {downloaded_file}")
+                    self.broadcast(task)
+                else:
+                    task.status = TaskStatus.FAILED
+                    task.error_message = "未能获取到可用的直链，源站节点响应超时或需过盾。建议直接粘贴直链 URL。"
+                    task.logs.append(f"❌ {task.error_message}")
+                    self.broadcast(task)
+
+        except Exception as e:
+            task.status = TaskStatus.FAILED
+            task.error_message = f"检索与下载异常: {str(e)}"
+            task.logs.append(f"❌ {task.error_message}")
+            self.broadcast(task)
 
     async def _exec_direct(self, task: TaskInfo, req: DownloadRequest, env: dict):
         out_dir = os.path.join(DEFAULT_DOWNLOAD_DIR, "files")
