@@ -81,7 +81,7 @@ async def list_files():
         # Skip hidden directories
         dirs[:] = [d for d in dirs if not d.startswith('.')]
         for f in files:
-            if f.startswith('.') or f.endswith(".part") or f.endswith(".tmp") or f.endswith(".bin"):
+            if f.startswith('.') or f.endswith(".part") or f.endswith(".tmp"):
                 continue
             full_path = os.path.join(root, f)
             rel_path = os.path.relpath(full_path, DEFAULT_DOWNLOAD_DIR)
