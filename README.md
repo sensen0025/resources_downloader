@@ -102,6 +102,22 @@ node plugin/tests/run.mjs
 for f in plugin/index.js plugin/lib/*.js; do node --check "$f"; done
 ```
 
+## 🤝 社区贡献与新技能提交 (Contributing)
+
+我们非常欢迎社区开发者为各大站点贡献新的 **DSH 技能卡**！
+
+- **贡献规范与流程**：详见 [CONTRIBUTING.md](./CONTRIBUTING.md)
+- **站点知识卡标准**：详见 [docs/site-skills-spec.md](./docs/site-skills-spec.md)
+- **专用下载器接入标准**：详见 [docs/targeted-downloader-spec.md](./docs/targeted-downloader-spec.md)
+
+### 快速提交 Checklist：
+1. 在 `.dsh/skills/site-<slug>.md` 编写技能卡（遵循 Frontmatter 与章节规范）；
+2. 在 `.dsh/skills/site-directory.md` 登记新站点/工具（标记实测环境与日期）；
+3. 确保 `plugin/` 保持通用（零站点写死代码），运行本地测试：`node plugin/tests/run.mjs`；
+4. 发起 Pull Request！
+
+---
+
 ## License
 
 MIT © 2026 sensen0025
