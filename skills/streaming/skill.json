@@ -1,7 +1,0 @@
-{
-  "name": "streaming",
-  "version": "0.1.0",
-  "description": "流式下载:音视频分段并发/HLS",
-  "tools": ["download_stream"],
-  "requires": []
-}

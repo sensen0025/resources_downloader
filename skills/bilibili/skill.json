@@ -1,7 +1,0 @@
-{
-  "name": "bilibili",
-  "version": "0.1.0",
-  "description": "B站音频抓取:浏览器会话过反爬(412),从页面 playinfo 读 DASH 音频流并下载为 m4a;含 B站搜索(换源)",
-  "tools": ["bilibili_fetch"],
-  "requires": []
-}

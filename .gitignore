@@ -1,17 +1,8 @@
-# 凭证与本地配置
-.env
-.env.local
-*.pem
-id_rsa
-id_ed25519
-github_deploy_key*
-
 # 本地运行产物与缓存
 downloads/
 .rd_scratch/
 memory/
 _default/
-data/
 *.log
 *.part
 
@@ -21,32 +12,15 @@ node_modules/
 # Python
 __pycache__/
 *.py[cod]
-.venv/
-venv/
-.pytest_cache/
 
-# 合成验证码评测数据
-bench_data/
-
-# 注册器保存的账号凭证
-accounts/credentials.json
-
-# 登录态 Cookie(账号敏感信息,不入库)
-accounts/cookies/
-accounts/quark_cookie.json
-
-# 服务器 SSH 凭据脚本(含明文密码,绝不上库)
-ssh_run.py
-ssh_util.py
-_sync_edge_cookies.py
-_verify_server.py
-_remove_sensitive.py
+# 配置与密钥（绝不入库）
+.env
+.env.local
+*.pem
+id_rsa
+id_ed25519
+github_deploy_key*
 
 # 系统
 .DS_Store
 Thumbs.db
-
-# 临时测试与运行脚本
-_run*
-_test*
-scripts/archive/

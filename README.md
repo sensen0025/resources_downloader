@@ -1,61 +1,73 @@
-# resources_downloader / Resource Hub
+# resources_downloader
 
-让 **DSH 智能体自己会下载任何资源** 的通用技能包与全能下载引擎。
+让 **DSH 智能体自己会下载任何资源** 的通用技能包 —— 不维护任何站点专有代码。
 
 ```
-用户需求(任意站点 / 任意资源 / 专用下载器 / 验证码 / 网盘 / 爬虫)
+用户需求(任意站点 / 任意资源 / 专用下载器 / 验证码 / 爬虫 / 多轮重试)
         │
         ▼
-DSH / AI Harness 核心大脑(规划、多轮、失败重试、自动探针交付)
+DSH = 唯一的大脑(规划、多轮策略、失败重试、探针校验交付)       ← 核心
         │
-   ┌────┴──────────────────────────┐
-   ▼                               ▼
-.dsh/skills/ (17+ 知识技能卡)   plugin/ (rd-tools 插件) + python skills
+  本仓库只做两件事 ────────────────────────────────
+  ① .dsh/skills/   教 agent 怎么干的“方法论”与资源站技能卡 (17 张)
+  ② plugin/        cordis 通用、稳定、与站点无关的执行工具底座
 ```
 
----
+## 设计原则
 
-## 核心能力与知识技能卡 (`.dsh/skills/`)
+用户的请求不可枚举：新站、冷门资源、登录墙、反爬、要“自己写个爬虫抓”……
+给每个站点写死一个适配器 = 永远在维护会过期的代码。
 
-| 技能卡 | 类型 | 说明与实测状态 |
-|---|---|---|
-| `site-directory` | 目录导航 | 专用下载器 A 表 + 通用知识卡 B 表总索引 |
-| `site-bilibili-bbdown` | 专用下载器 | B站/番剧/合集/弹幕首选 BBDown（✅ v1.6.3 + ffmpeg 实测） |
-| `site-videos-yt-dlp` | 专用下载器 | YouTube / 千站视频首选 yt-dlp（✅ 2026.08.19 + node/ffmpeg 实测） |
-| `site-annas-archive` | 站点知识卡 | Anna's Archive (https://annas-archive.gd/) DDoS-Guard 过盾 + 慢速合作节点直链下载（✅ 实测） |
-| `site-project-gutenberg` | 站点知识卡 | 古登堡公版书直链提取（✅ 实测） |
-| `site-open-access-papers`| 站点知识卡 | 学术论文 OA 链路 (Crossref→Unpaywall→Europe PMC)（✅ 实测） |
-| `site-huggingface-datasets`| 站点知识卡 | HF 数据集流式取样与下载（✅ 实测） |
-| `site-littleskin` | 站点知识卡 | LittleSkin 皮肤/材质下载（✅ 实测） |
-| `site-quark-netdisk` | 站点知识卡 | 夸克网盘分享解析与转存下载 |
-| `resource-download` | 通用方法论 | 资源下载顶层规划、澄清意图与交付 |
-| `download-and-verify` | 通用方法论 | 探针校验（魔数/大小/哈希）与产物交付纪律 |
-| `write-and-run-crawler` | 通用方法论 | 针对冷门站点的临时 Python 爬虫编写与运行 |
-| `captcha-handling` | 通用方法论 | 验证码识别与绕过 |
-| `site-memory` | 通用方法论 | 站点成功经验与坑点沉淀 |
+本仓库反过来：**把“会干活”的能力全给 LLM** —— 写程序、运行执行、搜索、抓页面、确定性下载、验证。
+- **通用能力工具**：零站点专有常驻代码；
+- **专用成熟下载器**：优先使用社区维护的成熟 CLI（如 B站 BBDown、YouTube yt-dlp）；
+- **失败多轮换法**：技能文档规定了“多轮策略换法重试”的纪律（证据驱动，不盲试）；
+- **交付必须验证**：探针校验大小/魔数/哈希后才算成功。
 
 ---
 
-## 工具底座 (`plugin/` 与 Python Skills)
+## 仓库内容
 
-- **`plugin/` (rd-tools)**：Cordis 工具插件，提供 `run_code`、`http_fetch`、`web_search`、`download_file`（断点续传）、`download_hls`、`probe_file`、`browser`（Playwright 浏览器自动化与验证码处理）、`memory_remember`/`memory_query`。
-- **Python 引擎 (`skills/`, `pages/`, `search/`, `api/`, `web/`)**：
-  - 邮箱验证码自动收码 (`skills/mail`)
-  - 视觉/滑块验证码解析 (`skills/captcha`)
-  - 大文件流式与 HLS 下载 (`skills/streaming`)
-  - 网页控制台与 RESTful API (`web/`, `api/`)
+| 路径 | 内容 |
+|---|---|
+| `.dsh/skills/*.md` | **17 个 DSH 技能卡**：通用 6 个（`resource-download`、`find-and-resolve-sources`、`write-and-run-crawler`、`download-and-verify`、`site-memory`、`captcha-handling`）+ `site-directory` 总目录 + **资源站知识卡与专用下载器卡**（`site-bilibili-bbdown`、`site-videos-yt-dlp`、`site-annas-archive`、`site-project-gutenberg`、`site-open-access-papers`、`site-huggingface-datasets`、`site-littleskin` 等） |
+| `plugin/` | cordis 工具插件 `rd-tools`：`run_code`、`http_fetch`、`web_search`、`download_file`（断点续传）、`download_hls`（m3u8/AES-128）、`probe_file`（魔数/哈希验证）、`browser`（可选：Python playwright 通用浏览器自动化：持久会话/登录/反爬/点击下载/导 Cookie/验证码识别）、`memory_remember`/`memory_query`（站点记忆与打分） |
+| `plugin/lib/` | 各工具独立实现 |
+| `plugin/tests/run.mjs` | 离线单测套件（本地 HTTP 夹具） |
+| `docs/` | 技能卡与专用下载器接入规范文档 |
+| `.github/workflows/ci.yml`| 自动化 CI：语法检查 + 离线单测 |
 
 ---
 
-## 本地快速开始
+## 安装与使用
+
+### 1. 技能包
+把仓库作为 DSH 的 workspace（在该目录开会话）即可自动发现 `.dsh/skills/`；
+也可将 `.dsh/skills/` 软链或复制进任意项目的同名目录。
+
+### 2. 工具插件（注册进 profile 如 `web`/`headless`）
+```bash
+dsh plugin --profile web add "link:/path/to/resources_downloader/plugin"
+```
+
+### 3. 环境依赖
+- **Node** ≥ 18.17（JS 插件零外部依赖）
+- **ffmpeg**：音视频合流必需
+- **专用下载器**（宿主机）：
+  - **BBDown** (`~/bin/BBDown`)：B站下载首选
+  - **yt-dlp** (`~/bin/yt-dlp`)：YouTube 及千站通用音视频首选
+- **可选依赖**：`playwright`（浏览器自动化）、`ddddocr`（验证码识别）
+
+---
+
+## 开发与测试
 
 ```bash
-# 1. 运行单测
+# 离线单测
 node plugin/tests/run.mjs
-for f in plugin/index.js plugin/lib/*.js; do node --check "$f"; done
 
-# 2. 启动服务控制台 (可选)
-uvicorn api.app:app --port 8000
+# 语法检查
+for f in plugin/index.js plugin/lib/*.js; do node --check "$f"; done
 ```
 
 ## License

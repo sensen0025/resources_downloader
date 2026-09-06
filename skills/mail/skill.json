@@ -1,7 +1,0 @@
-{
-  "name": "mail",
-  "version": "0.1.0",
-  "description": "邮箱收码:IMAP 轮询收验证码/安全链接",
-  "tools": ["mail_code"],
-  "requires": []
-}
