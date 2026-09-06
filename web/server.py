@@ -46,6 +46,14 @@ async def create_download_task(req: DownloadRequest):
     task = await task_manager.submit_task(req)
     return task
 
+@app.get("/api/v1/tasks/events")
+async def task_events_stream():
+    return StreamingResponse(
+        task_manager.add_listener(None),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "Connection": "keep-alive", "X-Accel-Buffering": "no"}
+    )
+
 @app.get("/api/v1/tasks", response_model=List[TaskInfo])
 async def list_tasks():
     return list(task_manager.tasks.values())
@@ -55,14 +63,6 @@ async def get_task(task_id: str):
     if task_id not in task_manager.tasks:
         raise HTTPException(status_code=404, detail="Task not found")
     return task_manager.tasks[task_id]
-
-@app.get("/api/v1/tasks/events")
-async def task_events_stream():
-    return StreamingResponse(
-        task_manager.add_listener(None),
-        media_type="text/event-stream",
-        headers={"Cache-Control": "no-cache", "Connection": "keep-alive", "X-Accel-Buffering": "no"}
-    )
 
 @app.get("/api/v1/tasks/{task_id}/events")
 async def single_task_events_stream(task_id: str):
