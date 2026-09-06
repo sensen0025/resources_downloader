@@ -1,0 +1,11 @@
+{
+  "name": "rd-generic-tools",
+  "version": "0.1.0",
+  "private": true,
+  "description": "resources_downloader generic capability tools for DSH (code-exec / http fetch / web search / direct download / HLS / file probe). No site-specific logic.",
+  "type": "module",
+  "main": "index.js",
+  "engines": {
+    "node": ">=18.17"
+  }
+}

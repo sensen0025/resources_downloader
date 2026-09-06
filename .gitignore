@@ -1,5 +1,22 @@
 # 凭证与本地配置
 .env
+.env.local
+*.pem
+id_rsa
+id_ed25519
+github_deploy_key*
+
+# 本地运行产物与缓存
+downloads/
+.rd_scratch/
+memory/
+_default/
+data/
+*.log
+*.part
+
+# Node
+node_modules/
 
 # Python
 __pycache__/
@@ -29,19 +46,7 @@ _remove_sensitive.py
 .DS_Store
 Thumbs.db
 
-# 本地数据与下载产物
-downloads/
-data/
-*.log
-*.part
-
 # 临时测试与运行脚本
 _run*
 _test*
-
-# 一次性/调试脚本与部署私钥归档
 scripts/archive/
-
-# Deploy Key (核心安全: 绝对不能提交私钥!)
-github_deploy_key
-github_deploy_key.pub
