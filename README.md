@@ -1,120 +1,133 @@
 # resources_downloader
 
-让 **DSH 智能体自己会下载任何资源** 的通用技能包 —— 不维护任何站点专有代码。
+A generic skill pack that lets a **DSH agent download anything itself** — with **zero site-specific code** to maintain.
 
 ```
-用户需求(任意站点 / 任意资源 / 专用下载器 / 验证码 / 爬虫 / 多轮重试)
+User request (any site / any resource / dedicated downloader / captcha / crawler / multi-round retries)
         │
         ▼
-DSH = 唯一的大脑(规划、多轮策略、失败重试、探针校验交付)       ← 核心
+DSH = the only brain (planning, multi-round strategy, failure retries, probe-verified delivery)   ← core
         │
-  本仓库只做两件事 ────────────────────────────────
-  ① .dsh/skills/   教 agent 怎么干的“方法论”与资源站技能卡 (17 张)
-  ② plugin/        cordis 通用、稳定、与站点无关的执行工具底座
+   This repo does exactly two things ─────────────────────────────
+   ① .dsh/skills/   methodology + resource-site skill cards that teach the agent how (21 cards)
+   ② plugin/        cordis generic, stable, site-agnostic execution tooling
 ```
 
-## 设计原则
+## Design principles
 
-用户的请求不可枚举：新站、冷门资源、登录墙、反爬、要“自己写个爬虫抓”……
-给每个站点写死一个适配器 = 永远在维护会过期的代码。
+User requests are not enumerable: new sites, niche resources, login walls, anti-bot defenses,
+"write your own crawler for this"…
+Hard-coding an adapter per site means maintaining code that will rot.
 
-本仓库反过来：**把“会干活”的能力全给 LLM** —— 写程序、运行执行、搜索、抓页面、确定性下载、验证。
-- **通用能力工具**：零站点专有常驻代码；
-- **专用成熟下载器**：优先使用社区维护的成熟 CLI（如 B站 BBDown、YouTube yt-dlp）；
-- **失败多轮换法**：技能文档规定了“多轮策略换法重试”的纪律（证据驱动，不盲试）；
-- **交付必须验证**：探针校验大小/魔数/哈希后才算成功。
+This repo inverts that: **give the LLM all the capabilities to get the job done** — write programs,
+execute them, search, fetch pages, download deterministically, verify.
+- **Generic capability tools**: zero site-specific resident code;
+- **Mature dedicated downloaders**: prefer community-maintained CLIs (e.g. BBDown for Bilibili,
+  yt-dlp for YouTube) when they exist;
+- **Evidence-driven retries**: the skill docs define multi-round strategy switching discipline
+  (no blind guessing) **and** allow the agent to terminate gracefully when it judges further
+  attempts hopeless (see `task-termination`);
+- **Delivery must be verified**: a probe checks size / magic bytes / hash before a task counts as done.
 
 ---
 
-## 🤖 DSH 技能自挂载 Prompt（复制即用）
+## 🤖 DSH skill auto-mount prompt (copy & paste)
 
-> 将以下 Prompt 作为 System Prompt 或初始指令发送给 DSH，即可让 DSH **自主发现、挂载并调度本仓库的所有技能**：
+> Send the following prompt as a System Prompt or initial instruction to DSH to let it
+> **discover, mount and orchestrate all skills in this repo by itself**:
 
-```markdown
-你现在是全能资源下载智能体（Resource Downloader Agent）。
-你的工作空间包含 `.dsh/skills/` 技能库与 `plugin/` 通用执行底座。
+````markdown
+You are now an all-purpose resource download agent.
+Your workspace contains a `.dsh/skills/` skill library and a `plugin/` generic execution base.
 
-### 你的执行纪律与工作流：
+### Your execution discipline & workflow:
 
-1. 【第一步：查目录与记忆】
-   - 收到任何资源需求（视频/电子书/论文/数据集/网盘/壁纸等），首先通过 view_file 读取 `.dsh/skills/site-directory.md` 和调用 `memory_query`。
-   - **专用下载器优先（A 表）**：若命中 B站（BBDown）、YouTube（yt-dlp）等，直接加载对应卡执行 CLI 命令，**严禁绕过成熟工具去手写爬虫**。
-   - **站点知识卡（B 表）**：若命中 Anna's Archive（过盾+慢速节点）、Gutenberg、HF、LittleSkin 等，加载对应 `site-<slug>.md` 照做。
-   - **冷门/新站**：按 `resource-download` 与 `write-and-run-crawler` 指导，用 `run_code` 现写一次性 Python 脚本解密或提取直链。
-
-2. 【第二步：确定性执行】
-   - 直链下载：调用 `download_file`（断点续传）；
-   - 流媒体/切片：调用 `download_hls`；
-   - 复杂交互/反爬/过盾：调用 `browser`（Playwright 持久会话与验证码识别）。
-
-3. 【第三步：探针强制验证】
-   - 下载完成后，**必须**调用 `probe_file` 校验文件魔数（如 MP4 `ftyp`、EPUB `PK`、PDF `%PDF`）、非空性与 SHA-256。
-   - 严禁交付空文件或 HTML 报错页。
-
-4. 【第四步：规范交付与记忆】
-   - 向用户交付完整元数据：【文件路径】+【大小】+【SHA-256】+【来源 URL/MD5】。
-   - 调用 `memory_remember` 将本次实测有效的域名、参数与坑点写入站点记忆。
-```
+1. [Step 1: check the catalog & memory]
+   - For any resource request (video / e-book / paper / dataset / cloud drive / wallpaper, etc.),
+     first read `.dsh/skills/site-directory.md` via view_file and call `memory_query`.
+   - Dedicated downloader first (table A): if Bilibili (BBDown), YouTube (yt-dlp), etc. match,
+     load the corresponding card and run the CLI — do NOT bypass a mature tool to hand-write a crawler.
+   - Site knowledge cards (table B): for Anna's Archive (DDoS-Guard + slow mirror), Gutenberg, HF,
+     LittleSkin, etc., load the matching `site-<slug>.md` and follow it.
+   - Niche/new sites: follow `resource-download` and `write-and-run-crawler`, use `run_code` to write
+     one-off Python scripts on the spot to decrypt or extract direct links.
+2. [Step 2: deterministic execution]
+   - Direct links: call `download_file` (range resume);
+   - Streams / segments: call `download_hls`;
+   - Complex interaction / anti-bot / guard pages: call `browser` (Playwright persistent session
+     and captcha solving).
+3. [Step 3: mandatory probe verification]
+   - After downloading, you MUST call `probe_file` to verify magic bytes (e.g. MP4 `ftyp`,
+     EPUB `PK`, PDF `%PDF`), non-empty size and SHA-256.
+   - Never deliver an empty file or an HTML error page.
+4. [Step 4: clean delivery & memory]
+   - Deliver full metadata: [file path] + [size] + [SHA-256] + [source URL/MD5].
+   - Call `memory_remember` to persist domains, parameters and pitfalls that actually worked.
+5. [Step 5: know when to stop]
+   - If ~3+ distinct strategies made no real progress, tool calls keep spinning, or a decisive
+     blocker is hit, wrap up per `task-termination`: deliver the closest verified variant of the
+     same resource (marked near-miss) or report failure with evidence — do not burn forever.
+````
 
 ---
 
-## 仓库内容
+## Repository contents
 
-| 路径 | 内容 |
+| Path | Contents |
 |---|---|
-| `.dsh/skills/*.md` | **19 个 DSH 技能卡**（可用，旧版 5 张已按规范删除）：通用 6 个（`resource-download`、`find-and-resolve-sources`、`write-and-run-crawler`、`download-and-verify`、`site-memory`、`captcha-handling`）+ `site-directory` 总目录 + **资源站知识卡与专用下载器卡**（`site-bilibili-bbdown`、`site-videos-yt-dlp`、`site-gdgame`、`site-haowallpaper`、`site-annas-archive`、`site-project-gutenberg`、`site-open-access-papers`、`site-huggingface-datasets`、`site-littleskin` 等） |
-| `plugin/` | cordis 工具插件 `rd-tools`：`run_code`、`http_fetch`、`web_search`、`download_file`（断点续传）、`download_hls`（m3u8/AES-128）、`probe_file`（魔数/哈希验证）、`browser`（可选：Python playwright 通用浏览器自动化：持久会话/登录/反爬/点击下载/导 Cookie/验证码识别）、`memory_remember`/`memory_query`（站点记忆与打分） |
-| `plugin/lib/` | 各工具独立实现 |
-| `plugin/tests/run.mjs` | 离线单测套件（本地 HTTP 夹具） |
-| `docs/` | 技能卡与专用下载器接入规范文档 |
-| `.github/workflows/ci.yml`| 自动化 CI：语法检查 + 离线单测 |
+| `.dsh/skills/*.md` | **21 DSH skill cards**: methodology (`resource-download`, `find-and-resolve-sources`, `write-and-run-crawler`, `download-and-verify`, `site-memory`, `captcha-handling`, `cookie-vault`, `task-termination`) + `site-directory` (index) + site-specific cards (`site-bilibili-bbdown`, `site-videos-yt-dlp`, `site-gdgame`, `site-haowallpaper`, `site-annas-archive`, `site-project-gutenberg`, `site-open-access-papers`, `site-huggingface-datasets`, `site-quark-netdisk`, `site-littleskin`, …) |
+| `plugin/` | cordis tool plugin `rd-tools`: `run_code`, `http_fetch`, `web_search`, `download_file` (range resume), `download_hls` (m3u8/AES-128), `probe_file` (magic/hash verification), `browser` (optional Python playwright automation: persistent session / login / anti-bot / click-to-download / cookie export / captcha solving), `memory_remember`/`memory_query` (site memory & scoring) |
+| `plugin/lib/` | standalone implementations of every tool |
+| `plugin/tests/run.mjs` | offline unit test suite (local HTTP fixtures) |
+| `docs/` | skill-card & dedicated-downloader authoring specs |
+| `.github/workflows/ci.yml` | automated CI: syntax checks + offline unit tests |
 
 ---
 
-## 安装与使用
+## Install & usage
 
-### 1. 技能包
-把仓库作为 DSH 的 workspace（在该目录开会话）即可自动发现 `.dsh/skills/`；
-也可将 `.dsh/skills/` 软链或复制进任意项目的同名目录。
+### 1. Skills
+Open a session with this repo as the DSH workspace and `.dsh/skills/` is auto-discovered;
+alternatively symlink or copy `.dsh/skills/` into the same directory of any project.
 
-### 2. 工具插件（注册进 profile 如 `web`/`headless`）
+### 2. Tool plugin (register into a profile such as `web` / `headless`)
 ```bash
 dsh plugin --profile web add "link:/path/to/resources_downloader/plugin"
 ```
 
-### 3. 环境依赖
-- **Node** ≥ 18.17（JS 插件零外部依赖）
-- **ffmpeg**：音视频合流必需
-- **专用下载器**（宿主机）：
-  - **BBDown** (`~/bin/BBDown`)：B站下载首选
-  - **yt-dlp** (`~/bin/yt-dlp`)：YouTube 及千站通用音视频首选
-- **可选依赖**：`playwright`（浏览器自动化）、`ddddocr`（验证码识别）
+### 3. Runtime dependencies
+- **Node** ≥ 18.17 (JS plugin: zero external deps)
+- **ffmpeg**: required to mux audio/video
+- **Dedicated downloaders** (on the host):
+  - **BBDown** (`~/bin/BBDown`): preferred for Bilibili
+  - **yt-dlp** (`~/bin/yt-dlp`): preferred for YouTube and 1000+ sites
+- **Optional**: `playwright` (browser automation), `ddddocr` (captcha OCR)
 
 ---
 
-## 开发与测试
+## Development & testing
 
 ```bash
-# 离线单测
+# Offline unit tests
 node plugin/tests/run.mjs
 
-# 语法检查
+# Syntax checks
 for f in plugin/index.js plugin/lib/*.js; do node --check "$f"; done
 ```
 
-## 🤝 社区贡献与新技能提交 (Contributing)
+## 🤝 Contributing
 
-我们非常欢迎社区开发者为各大站点贡献新的 **DSH 技能卡**！
+We welcome community skill cards for more sites!
 
-- **贡献规范与流程**：详见 [CONTRIBUTING.md](./CONTRIBUTING.md)
-- **站点知识卡标准**：详见 [docs/site-skills-spec.md](./docs/site-skills-spec.md)
-- **专用下载器接入标准**：详见 [docs/targeted-downloader-spec.md](./docs/targeted-downloader-spec.md)
+- **Contribution guide & workflow**: see [CONTRIBUTING.md](./CONTRIBUTING.md)
+- **Site knowledge-card spec**: see [docs/site-skills-spec.md](./docs/site-skills-spec.md)
+- **Dedicated-downloader spec**: see [docs/targeted-downloader-spec.md](./docs/targeted-downloader-spec.md)
 
-### 快速提交 Checklist：
-1. 在 `.dsh/skills/site-<slug>.md` 编写技能卡（遵循 Frontmatter 与章节规范）；
-2. 在 `.dsh/skills/site-directory.md` 登记新站点/工具（标记实测环境与日期）；
-3. 确保 `plugin/` 保持通用（零站点写死代码），运行本地测试：`node plugin/tests/run.mjs`；
-4. 发起 Pull Request！
+### Quick contribution checklist
+1. Write the skill card at `.dsh/skills/site-<slug>.md` (follow the Frontmatter & section spec);
+2. Register the new site/tool in `.dsh/skills/site-directory.md` (mark environment & date tested);
+3. Keep `plugin/` generic (zero site-specific code) and run local tests: `node plugin/tests/run.mjs`;
+4. Open a Pull Request!
 
 ---
 
