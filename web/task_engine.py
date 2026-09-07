@@ -393,33 +393,73 @@ class TaskManager:
         # Give the headless agent read access to the private cookie vault (path only;
         # values stay inside vault files, never on the command line or in logs).
         env["RD_COOKIE_DIR"] = cookie_vault.COOKIE_DIR
+        # Wall-clock budget: agent may self-terminate earlier (task-termination skill),
+        # but we enforce a hard cap so a runaway session can't burn forever.
+        agent_timeout = float(os.environ.get("RD_AGENT_TIMEOUT_SEC", "1800"))
+        task.logs.append(f"⏱️ agent 预算上限 {int(agent_timeout)}s（可自主提前收尾，见 task-termination 技能）")
+        self.broadcast(task)
         proc = await asyncio.create_subprocess_exec(
             dsh, "--profile", "headless", self._dsh_prompt(req.url_or_query, repo, dl_dir),
             cwd=repo, stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT, env=env)
-        while True:
-            raw = await proc.stdout.readline()
-            if not raw:
-                break
-            line = raw.decode("utf-8", "ignore").strip()
-            if not line:
-                continue
-            task.logs.append(line[-400:])
-            m = re.search(r"(STATUS|进度|progress)[：:]?\s*([\d.]+)%", line, re.I)
-            if m:
-                task.progress = min(99.0, float(m.group(2)))
-            task.logs = task.logs[-300:]
-            self.broadcast(task)
+        final_json = None
+        timed_out = False
+        try:
+            while True:
+                raw = await asyncio.wait_for(proc.stdout.readline(), timeout=agent_timeout)
+                if not raw:
+                    break
+                line = raw.decode("utf-8", "ignore").strip()
+                if not line:
+                    continue
+                task.logs.append(line[-400:])
+                m = re.search(r"(STATUS|进度|progress)[：:]?\s*([\d.]+)%", line, re.I)
+                if m:
+                    task.progress = min(99.0, float(m.group(2)))
+                fj = re.search(r'FINAL_JSON:\s*(\{.*\})', line)
+                if fj:
+                    try:
+                        final_json = json.loads(fj.group(1))
+                    except Exception:
+                        final_json = None
+                task.logs = task.logs[-300:]
+                self.broadcast(task)
+        except asyncio.TimeoutError:
+            timed_out = True
+            task.logs.append(f"⏱️ 超过 {int(agent_timeout)}s 预算上限，自动收尾（kill agent）")
+            try:
+                proc.kill()
+            except Exception:
+                pass
         rc = await proc.wait()
-        task.logs.append(f"📄 DSH agent 退出码 {rc}")
+        task.logs.append(f"📄 DSH agent 退出码 {rc}{'（超时 kill）' if timed_out else ''}")
         new_files = self._find_new_files(before, scan_dirs)
+        delivered = final_json and final_json.get("path") and os.path.exists(final_json["path"])
         if new_files:
             picked = max(new_files, key=lambda fp: os.path.getsize(fp))
             task.output_file = picked
             task.title = os.path.basename(picked)
             task.logs.append(f"📦 发现交付文件: {picked}")
+            if final_json and final_json.get("note"):
+                task.logs.append(f"📝 agent 说明: {final_json['note'][:300]}")
+        elif delivered:
+            task.output_file = final_json["path"]
+            task.title = os.path.basename(final_json["path"])
+            task.logs.append(f"📦 agent 自报交付: {final_json['path']}")
+            if final_json.get("note"):
+                task.logs.append(f"📝 agent 说明: {final_json['note'][:300]}")
+        elif final_json and final_json.get("error"):
+            task.logs.append(f"🚫 agent 自主收尾: {str(final_json['error'])[:400]}")
+            raise RuntimeError(f"agent 自主收尾: {str(final_json['error'])[:400]}")
+        elif timed_out:
+            task.logs.append("⏱️ 超时自动收尾且未产出文件")
+            raise RuntimeError("agent 超过预算上限且未产出文件")
         elif rc != 0:
-            task.logs.append("❌ agent 异常退出，见上方输出")
+            task.logs.append("❌ agent 未产出文件且异常退出，见上方输出")
+            raise RuntimeError("agent 未产出文件，异常退出")
+        else:
+            task.logs.append("🚫 agent 结束但未交付文件且无 FINAL_JSON 说明")
+            raise RuntimeError("agent 结束但未交付文件，且无 FINAL_JSON 收尾说明")
         self.broadcast(task)
 
     @staticmethod
@@ -456,8 +496,13 @@ class TaskManager:
             "默认对 vault 内的域自动带登录态（按 cookie-vault 技能决定是否显式 \"cookies\":false 卸载）"
             "——不要把 cookie 明文写进你的输出/日志。"
             "视频/图书/学术等按 site-* 技能与真实本机工具处理。"
-            "禁止假装成功：拿不到文件就明确说明障碍。最后一行输出："
-            'FINAL_JSON:{"path":"绝对路径","size":N,"note":"说明"} 或 FINAL_JSON:{"error":"原因"}'
+            "\n自主收尾（task-termination 技能）：你可以自行判断何时结束，不必死耗——"
+            "已换 ≥3 条策略无实质进展、连续约 8+ 次工具调用空转、或遇到决定性障碍时，主动收尾。"
+            "精确规格/档位拿不到时，允许交付同一资源最接近的可验证变体（如相邻清晰度/格式），"
+            "但交付前必须 probe 验证并在 note 注明差异与 matched 字段；禁止跨类型偷换与编造。"
+            "最后一行输出："
+            'FINAL_JSON:{"path":"绝对路径","size":N,"note":"说明","matched":"exact|near-miss"} '
+            '或 FINAL_JSON:{"error":"原因"}'
         )
 
     async def _exec_direct(self, task: TaskInfo, req: DownloadRequest, env: dict):
