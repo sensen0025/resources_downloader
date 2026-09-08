@@ -448,7 +448,9 @@
           <div class="bg-dark-panel p-3.5 rounded-xl border border-dark-border flex flex-col justify-between space-y-3">
             <div class="space-y-1">
               <div class="flex items-center justify-between text-[11px] font-mono text-slate-400">
-                <span>${f.format_name}</span>
+                <span>
+                  <span class="text-[10px] px-1 rounded mr-1 ${f.root === 'repo' ? 'bg-brand-500/15 text-brand-400' : 'bg-slate-600/40 text-slate-400'}">${f.root === 'repo' ? 'agent' : 'dl'}</span>${f.format_name}
+                </span>
                 <span>${mbSize} MB</span>
               </div>
               <h4 class="text-xs font-medium text-slate-200 truncate" title="${f.name}">${f.name}</h4>
@@ -461,11 +463,11 @@
 
               <div class="flex items-center space-x-1.5">
                 ${(isVideo || isAudio) ? `
-                  <button onclick="openPlayerModal('${encodeURIComponent(f.rel_path)}', '${encodeURIComponent(f.name)}', '${isVideo ? 'video' : 'audio'}')" class="px-2 py-0.5 bg-brand-500 hover:bg-brand-600 text-dark-bg font-semibold rounded text-[11px]">
+                  <button onclick="openPlayerModal('${encodeURIComponent(f.rel_path)}', '${encodeURIComponent(f.name)}', '${isVideo ? 'video' : 'audio'}', '${f.root}')" class="px-2 py-0.5 bg-brand-500 hover:bg-brand-600 text-dark-bg font-semibold rounded text-[11px]">
                     播放
                   </button>
                 ` : ''}
-                <a href="/api/v1/files/download/${encodeURIComponent(f.rel_path)}" download class="px-2 py-0.5 bg-dark-bg hover:bg-dark-card text-slate-300 rounded text-[11px] border border-dark-border">
+                <a href="/api/v1/files/download/${encodeURIComponent(f.rel_path)}?root=${encodeURIComponent(f.root)}" download class="px-2 py-0.5 bg-dark-bg hover:bg-dark-card text-slate-300 rounded text-[11px] border border-dark-border">
                   下载
                 </a>
               </div>
@@ -504,13 +506,13 @@
       document.getElementById('probe-modal').classList.add('hidden');
     }
 
-    function openPlayerModal(relPath, fileName, type) {
+    function openPlayerModal(relPath, fileName, type, root) {
       const modal = document.getElementById('player-modal');
       const container = document.getElementById('player-container');
       const title = document.getElementById('player-title');
       
       title.innerText = decodeURIComponent(fileName);
-      const streamUrl = `/api/v1/files/stream/${relPath}`;
+      const streamUrl = `/api/v1/files/stream/${relPath}?root=${encodeURIComponent(root || 'home')}`;
 
       if (type === 'video') {
         container.innerHTML = `<video src="${streamUrl}" controls autoplay class="w-full max-h-[60vh] focus:outline-none"></video>`;

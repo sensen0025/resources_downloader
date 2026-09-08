@@ -32,6 +32,27 @@ STATIC_DIR = BASE_DIR / "static"
 TEMPLATES_DIR.mkdir(parents=True, exist_ok=True)
 STATIC_DIR.mkdir(parents=True, exist_ok=True)
 
+# File library roots. "home" keeps the legacy DEFAULT_DOWNLOAD_DIR behaviour;
+# "repo" is where DSH agents deliver files (BASE_DIR/downloads). Stream/download
+# URLs must carry ?root=repo for repo files; the default root stays "home".
+try:
+    from web.task_engine import BASE_DIR as ENGINE_BASE_DIR
+    REPO_DL_DIR = os.path.join(str(ENGINE_BASE_DIR), "downloads")
+except Exception:
+    REPO_DL_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "downloads")
+FILE_ROOTS = {"home": DEFAULT_DOWNLOAD_DIR, "repo": REPO_DL_DIR}
+
+
+def resolve_file_root(rel_path: str, root: str = "home"):
+    """Map a (root, rel_path) pair to an absolute path, rejecting escapes."""
+    base = FILE_ROOTS.get(root, FILE_ROOTS["home"])
+    full = os.path.normpath(os.path.join(base, rel_path))
+    real_base = os.path.realpath(base)
+    real_full = os.path.realpath(full)
+    if not (real_full == real_base or real_full.startswith(real_base + os.sep)):
+        raise HTTPException(status_code=400, detail="Path escapes allowed root")
+    return full
+
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
 @app.get("/", response_class=FileResponse)
@@ -77,27 +98,34 @@ async def single_task_events_stream(task_id: str):
 @app.get("/api/v1/files")
 async def list_files():
     results = []
-    for root, dirs, files in os.walk(DEFAULT_DOWNLOAD_DIR):
-        # Skip hidden directories
-        dirs[:] = [d for d in dirs if not d.startswith('.')]
-        for f in files:
-            if f.startswith('.') or f.endswith(".part") or f.endswith(".tmp"):
-                continue
-            full_path = os.path.join(root, f)
-            rel_path = os.path.relpath(full_path, DEFAULT_DOWNLOAD_DIR)
-            stat = os.stat(full_path)
-            probe = task_manager.probe_file_integrity(full_path)
-            results.append({
-                "rel_path": rel_path,
-                "full_path": full_path,
-                "name": f,
-                "size": stat.st_size,
-                "mtime": stat.st_mtime,
-                "format_name": probe.format_name if probe else "Binary",
-                "mime_type": probe.mime_type if probe else "application/octet-stream",
-                "sha256": probe.sha256 if probe else "",
-                "is_valid": probe.is_valid if probe else True
-            })
+    for root_name, base_dir in FILE_ROOTS.items():
+        if not os.path.isdir(base_dir):
+            continue
+        for root, dirs, files in os.walk(base_dir):
+            # Skip hidden directories
+            dirs[:] = [d for d in dirs if not d.startswith('.')]
+            for f in files:
+                if f.startswith('.') or f.endswith(".part") or f.endswith(".tmp"):
+                    continue
+                full_path = os.path.join(root, f)
+                rel_path = os.path.relpath(full_path, base_dir)
+                try:
+                    stat = os.stat(full_path)
+                except OSError:
+                    continue
+                probe = task_manager.probe_file_integrity(full_path)
+                results.append({
+                    "root": root_name,
+                    "rel_path": rel_path,
+                    "full_path": full_path,
+                    "name": f,
+                    "size": stat.st_size,
+                    "mtime": stat.st_mtime,
+                    "format_name": probe.format_name if probe else "Binary",
+                    "mime_type": probe.mime_type if probe else "application/octet-stream",
+                    "sha256": probe.sha256 if probe else "",
+                    "is_valid": probe.is_valid if probe else True
+                })
     results.sort(key=lambda x: x["mtime"], reverse=True)
     return results
 
@@ -110,8 +138,8 @@ async def probe_file_endpoint(path: str = Query(..., description="Absolute or re
     return probe
 
 @app.get("/api/v1/files/stream/{rel_path:path}")
-async def stream_media_file(rel_path: str, request: Request):
-    full_path = os.path.join(DEFAULT_DOWNLOAD_DIR, rel_path)
+async def stream_media_file(rel_path: str, request: Request, root: str = Query("home")):
+    full_path = resolve_file_root(rel_path, root)
     if not os.path.exists(full_path) or not os.path.isfile(full_path):
         raise HTTPException(status_code=404, detail="File not found")
         
@@ -159,8 +187,8 @@ async def stream_media_file(rel_path: str, request: Request):
     return StreamingResponse(iter_range(), status_code=status.HTTP_206_PARTIAL_CONTENT, headers=headers)
 
 @app.get("/api/v1/files/download/{rel_path:path}")
-async def direct_file_download(rel_path: str):
-    full_path = os.path.join(DEFAULT_DOWNLOAD_DIR, rel_path)
+async def direct_file_download(rel_path: str, root: str = Query("home")):
+    full_path = resolve_file_root(rel_path, root)
     if not os.path.exists(full_path) or not os.path.isfile(full_path):
         raise HTTPException(status_code=404, detail="File not found")
     return FileResponse(
