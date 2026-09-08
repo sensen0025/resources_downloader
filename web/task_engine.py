@@ -433,20 +433,40 @@ class TaskManager:
                 pass
         rc = await proc.wait()
         task.logs.append(f"📄 DSH agent 退出码 {rc}{'（超时 kill）' if timed_out else ''}")
+        if final_json and final_json.get("summary"):
+            task.logs.append(f"📋 任务总结: {str(final_json['summary'])[:600]}")
         new_files = self._find_new_files(before, scan_dirs)
-        delivered = final_json and final_json.get("path") and os.path.exists(final_json["path"])
-        if new_files:
-            picked = max(new_files, key=lambda fp: os.path.getsize(fp))
-            task.output_file = picked
-            task.title = os.path.basename(picked)
-            task.logs.append(f"📦 发现交付文件: {picked}")
+
+        # Agent-designated primary file wins (task-summary skill); else largest new file.
+        primary = None
+        extras = []
+        if final_json:
+            listed = final_json.get("files")
+            if isinstance(listed, list):
+                prim_cand = next((f["path"] for f in listed
+                                  if isinstance(f, dict) and f.get("role") == "primary"
+                                  and f.get("path") and os.path.exists(f["path"])), None)
+                if prim_cand:
+                    primary = prim_cand
+            if not primary and final_json.get("path") and os.path.exists(final_json["path"]):
+                primary = final_json["path"]
+        if not primary and new_files:
+            primary = max(new_files, key=lambda fp: os.path.getsize(fp))
+        # All existing listed files other than primary are shown as extras.
+        if final_json and isinstance(final_json.get("files"), list):
+            for f in final_json["files"]:
+                if (isinstance(f, dict) and f.get("path") and os.path.exists(f["path"])
+                        and f["path"] != primary):
+                    extras.append(f)
+
+        if primary:
+            task.output_file = primary
+            task.title = os.path.basename(primary)
+            task.logs.append(f"📦 结果文件: {primary}")
+            for ex in extras:
+                note = ex.get("note") or ""
+                task.logs.append(f"📎 附加文件: {ex['path']}" + (f"（{note[:120]}）" if note else ""))
             if final_json and final_json.get("note"):
-                task.logs.append(f"📝 agent 说明: {final_json['note'][:300]}")
-        elif delivered:
-            task.output_file = final_json["path"]
-            task.title = os.path.basename(final_json["path"])
-            task.logs.append(f"📦 agent 自报交付: {final_json['path']}")
-            if final_json.get("note"):
                 task.logs.append(f"📝 agent 说明: {final_json['note'][:300]}")
         elif final_json and final_json.get("error"):
             task.logs.append(f"🚫 agent 自主收尾: {str(final_json['error'])[:400]}")
@@ -500,9 +520,11 @@ class TaskManager:
             "已换 ≥3 条策略无实质进展、连续约 8+ 次工具调用空转、或遇到决定性障碍时，主动收尾。"
             "精确规格/档位拿不到时，允许交付同一资源最接近的可验证变体（如相邻清晰度/格式），"
             "但交付前必须 probe 验证并在 note 注明差异与 matched 字段；禁止跨类型偷换与编造。"
-            "最后一行输出："
-            'FINAL_JSON:{"path":"绝对路径","size":N,"note":"说明","matched":"exact|near-miss"} '
-            '或 FINAL_JSON:{"error":"原因"}'
+            "\n收尾格式（task-summary 技能）：输出前先给一行 📋 任务总结（要什么/找到什么/有无近似差异），"
+            "再用扩展 FINAL_JSON 明确指定结果文件（引擎优先采用你标记 role=primary 的主文件，其余进 files 列表）："
+            'FINAL_JSON:{"summary":"总结","path":"主文件绝对路径","size":N,"matched":"exact|near-miss",'
+            '"note":"主文件说明","files":[{"path":"…","size":N,"role":"primary|extra","note":"…"}]} '
+            '或 FINAL_JSON:{"error":"原因","summary":"试了什么/卡点/建议"}。旧格式 {"path","size","note"} 仍兼容。'
         )
 
     async def _exec_direct(self, task: TaskInfo, req: DownloadRequest, env: dict):

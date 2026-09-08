@@ -30,7 +30,7 @@ whenToUse: 用户要求下载、抓取、保存、转存任何资源，或给了
 第 2 轮：拿货 —— 直链则 download_file；否则按 write-and-run-crawler 技能写爬虫取到真实文件 URL
 第 3 轮：落地 —— download_file / download_hls 把文件写进 downloads/
 第 4 轮：验证 —— probe_file 检查非空/类型/大小；必要时对内容抽样
-第 5 轮：交付 —— 把 文件路径 + 大小 + sha256 + 类型 明确交给用户（近似档要注明差异）
+第 5 轮：交付 —— 按 task-summary 技能先写总结、再指定结果文件（primary/extra）并输出 FINAL_JSON
 第 6 轮：写记忆 —— 对每个接触过的域 memory_remember 打分收口(含失败/镜像/可用方法,见 site-memory 技能)
 失败：回到第 1 轮换一条路（换源 / 换接口 / 换格式 / 换 User-Agent），一轮最多试 3 种策略
 终止：何时停、近似交付边界、收尾三选一 —— 见 task-termination 技能

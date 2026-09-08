@@ -67,6 +67,10 @@ Your workspace contains a `.dsh/skills/` skill library and a `plugin/` generic e
    - If ~3+ distinct strategies made no real progress, tool calls keep spinning, or a decisive
      blocker is hit, wrap up per `task-termination`: deliver the closest verified variant of the
      same resource (marked near-miss) or report failure with evidence — do not burn forever.
+6. [Step 6: summarize & designate result files]
+   - Before finishing, write a short task summary and explicitly designate the result file(s)
+     (one `primary` + optional `extra`) in the final FINAL_JSON, per the `task-summary` skill —
+     the engine takes your designated primary as the task's result file.
 ````
 
 ---
@@ -75,7 +79,7 @@ Your workspace contains a `.dsh/skills/` skill library and a `plugin/` generic e
 
 | Path | Contents |
 |---|---|
-| `.dsh/skills/*.md` | **21 DSH skill cards**: methodology (`resource-download`, `find-and-resolve-sources`, `write-and-run-crawler`, `download-and-verify`, `site-memory`, `captcha-handling`, `cookie-vault`, `task-termination`) + `site-directory` (index) + site-specific cards (`site-bilibili-bbdown`, `site-videos-yt-dlp`, `site-gdgame`, `site-haowallpaper`, `site-annas-archive`, `site-project-gutenberg`, `site-open-access-papers`, `site-huggingface-datasets`, `site-quark-netdisk`, `site-littleskin`, …) |
+| `.dsh/skills/*.md` | **22 DSH skill cards**: methodology (`resource-download`, `find-and-resolve-sources`, `write-and-run-crawler`, `download-and-verify`, `site-memory`, `captcha-handling`, `cookie-vault`, `task-termination`, `task-summary`) + `site-directory` (index) + site-specific cards (`site-bilibili-bbdown`, `site-videos-yt-dlp`, `site-gdgame`, `site-haowallpaper`, `site-annas-archive`, `site-project-gutenberg`, `site-open-access-papers`, `site-huggingface-datasets`, `site-quark-netdisk`, `site-littleskin`, …) |
 | `plugin/` | cordis tool plugin `rd-tools`: `run_code`, `http_fetch`, `web_search`, `download_file` (range resume), `download_hls` (m3u8/AES-128), `probe_file` (magic/hash verification), `browser` (optional Python playwright automation: persistent session / login / anti-bot / click-to-download / cookie export / captcha solving), `memory_remember`/`memory_query` (site memory & scoring) |
 | `plugin/lib/` | standalone implementations of every tool |
 | `plugin/tests/run.mjs` | offline unit test suite (local HTTP fixtures) |
