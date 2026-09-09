@@ -302,6 +302,22 @@
           headers: {'Content-Type': 'application/json'},
           body: JSON.stringify(payload)
         });
+        if (!res.ok) {
+          let msg = `提交失败 (${res.status})`;
+          try {
+            const err = await res.json();
+            if (err.detail && typeof err.detail === 'object') {
+              const d = err.detail;
+              msg = d.error || msg;
+              if (d.retry_after_sec) msg += `，请约 ${Math.ceil(d.retry_after_sec / 60)} 分钟后重试`;
+              if (d.usage) msg += `（已用 ${d.usage.hourly}/${d.limits.hourly}/时 · ${d.usage.daily}/${d.limits.daily}/天）`;
+            } else if (err.detail) {
+              msg = err.detail;
+            }
+          } catch (e) { /* keep default msg */ }
+          showToast(msg, true);
+          return;
+        }
         const created = await res.json();
         lastSubmittedTaskId = created.id;
         
@@ -686,6 +702,11 @@
             <span>运行中: ${data.active_tasks}</span>
             <span>总任务: ${data.total_tasks}</span>
           </div>
+          ${data.submit_quota ? `
+          <div class="flex justify-between pt-1 border-t border-dark-border text-slate-500">
+            <span>本 IP 提交冷却 (1h/1d/7d):</span>
+            <span class="text-slate-300">${data.submit_quota.hourly}/${data.submit_quota.limits.hourly} · ${data.submit_quota.daily}/${data.submit_quota.limits.daily} · ${data.submit_quota.weekly}/${data.submit_quota.limits.weekly}</span>
+          </div>` : ''}
         `;
       } catch (e) {
         console.error(e);

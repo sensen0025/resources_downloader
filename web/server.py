@@ -11,6 +11,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from web.models import DownloadRequest, TaskInfo, ProbeResult
 from web.task_engine import task_manager, DEFAULT_DOWNLOAD_DIR
+from web import quota
 
 app = FastAPI(
     title="Resources Downloader Web Console",
@@ -60,10 +61,34 @@ app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 async def index():
     return FileResponse(str(TEMPLATES_DIR / "index.html"))
 
+def client_ip(request: Request) -> str:
+    """Client IP for quota tracking. Trusts X-Forwarded-For only when the
+    deployment opts in via RD_TRUST_PROXY=1 (e.g. behind nginx/caddy)."""
+    if os.environ.get("RD_TRUST_PROXY") == "1":
+        xff = request.headers.get("x-forwarded-for", "")
+        if xff:
+            return xff.split(",")[0].strip()
+    return request.client.host if request.client else "unknown"
+
+
 @app.post("/api/v1/download", response_model=TaskInfo)
-async def create_download_task(req: DownloadRequest):
+async def create_download_task(req: DownloadRequest, request: Request):
     if not req.url_or_query.strip():
         raise HTTPException(status_code=400, detail="Target URL or query cannot be empty")
+    ip = client_ip(request)
+    allowed, info = quota.check_and_record(ip)
+    if not allowed:
+        raise HTTPException(
+            status_code=429,
+            detail={
+                "error": "调用过于频繁，已触发每个 IP 的提交冷却",
+                "blocked_window": info["blocked_window"],
+                "usage": {k: info[k] for k in ("hourly", "daily", "weekly")},
+                "limits": info["limits"],
+                "retry_after_sec": info["retry_after_sec"],
+                "hint": "配额：1 小时 ≤10 次 / 1 天 ≤25 次 / 1 周 ≤50 次（按 IP）",
+            },
+        )
     task = await task_manager.submit_task(req)
     return task
 
@@ -84,6 +109,15 @@ async def get_task(task_id: str):
     if task_id not in task_manager.tasks:
         raise HTTPException(status_code=404, detail="Task not found")
     return task_manager.tasks[task_id]
+
+@app.post("/api/v1/tasks/{task_id}/cancel", response_model=TaskInfo)
+async def cancel_task(task_id: str):
+    if task_id not in task_manager.tasks:
+        raise HTTPException(status_code=404, detail="Task not found")
+    task = await task_manager.cancel_task(task_id)
+    if not task:
+        raise HTTPException(status_code=409, detail="Task is not cancellable (already finished)")
+    return task
 
 @app.get("/api/v1/tasks/{task_id}/events")
 async def single_task_events_stream(task_id: str):
@@ -263,7 +297,11 @@ async def system_status(request: Request):
         },
         "tools": tools,
         "active_tasks": sum(1 for t in task_manager.tasks.values() if t.status == "running"),
-        "total_tasks": len(task_manager.tasks)
+        "total_tasks": len(task_manager.tasks),
+        "submit_quota": {
+            **{k: v for k, v in quota.usage(client_ip(request)).items() if k != "limits"},
+            "limits": quota.LIMITS,
+        }
     }
 
 if __name__ == "__main__":

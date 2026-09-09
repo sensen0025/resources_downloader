@@ -9,6 +9,7 @@ import hashlib
 import zipfile
 import subprocess
 import shutil
+import signal
 from typing import Dict, List, Optional, AsyncGenerator
 from web.models import TaskInfo, TaskStatus, DownloadRequest, DownloadType, ProbeResult
 from web import cookie_vault
@@ -57,6 +58,8 @@ class TaskManager:
         self.tasks: Dict[str, TaskInfo] = {}
         self.listeners: Dict[str, List[asyncio.Queue]] = {}
         self.global_listeners: List[asyncio.Queue] = []
+        self._procs: Dict[str, asyncio.subprocess.Process] = {}
+        self._cancelled: set = set()
         self._load_history()
 
     def _load_history(self):
@@ -304,8 +307,37 @@ class TaskManager:
         asyncio.create_task(self._run_task(task_id, req, dtype))
         return task
 
+    async def cancel_task(self, task_id: str) -> Optional[TaskInfo]:
+        """Cancel a queued/running task: mark CANCELLED and kill its subprocess."""
+        task = self.tasks.get(task_id)
+        if not task:
+            return None
+        if task.status not in (TaskStatus.QUEUED, TaskStatus.RUNNING):
+            return None
+        self._cancelled.add(task_id)
+        proc = self._procs.get(task_id)
+        if proc and proc.returncode is None:
+            # Kill the whole process group (agent may spawn node/python children).
+            try:
+                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+            except Exception:
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
+        task.status = TaskStatus.CANCELLED
+        task.completed_at = time.time()
+        task.progress = 0.0
+        task.logs.append("⏹️ 任务已取消（用户操作）")
+        self.broadcast(task)
+        return task
+
     async def _run_task(self, task_id: str, req: DownloadRequest, dtype: DownloadType):
         task = self.tasks[task_id]
+        if task_id in self._cancelled:
+            task.status = TaskStatus.CANCELLED
+            self.broadcast(task)
+            return
         task.status = TaskStatus.RUNNING
         self.broadcast(task)
 
@@ -338,11 +370,21 @@ class TaskManager:
                     task.delivered_files = [entry]
             task.logs.append(f"🎉 任务完成！产物文件: {task.output_file}")
         except Exception as e:
-            task.status = TaskStatus.FAILED
-            task.error_message = str(e)
-            task.completed_at = time.time()
-            task.logs.append(f"❌ 执行失败: {e}")
+            if task_id in self._cancelled:
+                task.status = TaskStatus.CANCELLED
+                task.error_message = None
+                task.logs.append("⏹️ 任务已取消（用户操作）")
+            else:
+                task.status = TaskStatus.FAILED
+                task.error_message = str(e)
+                task.completed_at = time.time()
+                task.logs.append(f"❌ 执行失败: {e}")
             
+        if task_id in self._cancelled and task.status != TaskStatus.CANCELLED:
+            task.status = TaskStatus.CANCELLED
+            task.completed_at = time.time()
+        self._procs.pop(task_id, None)
+        self._cancelled.discard(task_id)
         self.broadcast(task)
 
     async def _exec_process(self, task: TaskInfo, cmd: List[str], env: dict, line_parser=None, secrets=()):
@@ -352,8 +394,10 @@ class TaskManager:
             *cmd,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT,
-            env=env
+            env=env,
+            start_new_session=True
         )
+        self._procs[task.id] = proc
         
         while True:
             line_bytes = await proc.stdout.readline()
@@ -459,7 +503,8 @@ class TaskManager:
         proc = await asyncio.create_subprocess_exec(
             dsh, "--profile", "headless", self._dsh_prompt(req.url_or_query, repo, dl_dir),
             cwd=repo, stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.STDOUT, env=env)
+            stderr=asyncio.subprocess.STDOUT, env=env, start_new_session=True)
+        self._procs[task.id] = proc
         final_json = None
         timed_out = False
         try:
