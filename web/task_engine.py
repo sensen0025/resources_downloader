@@ -39,9 +39,14 @@ def init_db():
             output_file TEXT,
             probe_json TEXT,
             error_message TEXT,
-            logs_json TEXT
+            logs_json TEXT,
+            delivered_json TEXT
         )
     ''')
+    # Migrate older DBs that lack the delivered_json column.
+    cols = [r[1] for r in c.execute('PRAGMA table_info(tasks)').fetchall()]
+    if 'delivered_json' not in cols:
+        c.execute('ALTER TABLE tasks ADD COLUMN delivered_json TEXT')
     conn.commit()
     conn.close()
 
@@ -63,6 +68,12 @@ class TaskManager:
                 probe_data = json.loads(row[13]) if row[13] else None
                 probe_obj = ProbeResult(**probe_data) if probe_data else None
                 logs = json.loads(row[15]) if row[15] else []
+                delivered = []
+                if len(row) > 16 and row[16]:
+                    try:
+                        delivered = json.loads(row[16])
+                    except Exception:
+                        delivered = []
                 t = TaskInfo(
                     id=row[0],
                     title=row[1] or "未命名任务",
@@ -79,8 +90,15 @@ class TaskManager:
                     output_file=row[12],
                     probe=probe_obj,
                     error_message=row[14],
-                    logs=logs[-100:]
+                    logs=logs[-100:],
+                    delivered_files=delivered
                 )
+                # Backfill manifest for older rows that finished before the
+                # delivered_files column existed.
+                if not t.delivered_files and t.output_file:
+                    entry = self._file_entry(t.output_file, "primary", "")
+                    if entry:
+                        t.delivered_files = [entry]
                 self.tasks[t.id] = t
             conn.close()
         except Exception as e:
@@ -92,14 +110,15 @@ class TaskManager:
             c = conn.cursor()
             probe_json = task.probe.model_dump_json() if task.probe else None
             logs_json = json.dumps(task.logs[-200:])
+            delivered_json = json.dumps(task.delivered_files, ensure_ascii=False)
             c.execute('''
-                INSERT OR REPLACE INTO tasks VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                INSERT OR REPLACE INTO tasks VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             ''', (
                 task.id, task.title, task.url_or_query, task.skill_used,
                 task.status.value, task.progress, task.speed_text, task.eta_text,
                 task.downloaded_bytes, task.total_bytes, task.created_at,
                 task.completed_at, task.output_file, probe_json,
-                task.error_message, logs_json
+                task.error_message, logs_json, delivered_json
             ))
             conn.commit()
             conn.close()
@@ -141,6 +160,40 @@ class TaskManager:
                 self.listeners[task_id].remove(q)
             elif q in self.global_listeners:
                 self.global_listeners.remove(q)
+
+    def _classify_root(self, file_path: str):
+        """Map an absolute path to (root, rel_path) for the file library."""
+        rp = os.path.realpath(file_path)
+        repo_dl = os.path.realpath(os.path.join(BASE_DIR, "downloads"))
+        home = os.path.realpath(DEFAULT_DOWNLOAD_DIR)
+        if rp.startswith(repo_dl + os.sep):
+            return "repo", os.path.relpath(rp, repo_dl)
+        if rp.startswith(home + os.sep):
+            return "home", os.path.relpath(rp, home)
+        # Fallback: expose via repo root when not under known dirs.
+        return "repo", os.path.relpath(rp, os.path.realpath(BASE_DIR))
+
+    def _file_entry(self, file_path: str, role: str, note: str = ""):
+        """One delivered-file manifest row; skips temp/hidden files."""
+        name = os.path.basename(file_path)
+        if name.startswith('.') or name.endswith(('.part', '.tmp')):
+            return None
+        if not os.path.isfile(file_path):
+            return None
+        root, rel = self._classify_root(file_path)
+        probe = self.probe_file_integrity(file_path)
+        return {
+            "path": file_path,
+            "rel_path": rel,
+            "root": root,
+            "name": name,
+            "size": os.path.getsize(file_path),
+            "format_name": probe.format_name if probe else "Binary",
+            "mime_type": probe.mime_type if probe else "application/octet-stream",
+            "sha256": probe.sha256 if probe else "",
+            "role": role,
+            "note": note or "",
+        }
 
     def probe_file_integrity(self, file_path: str) -> Optional[ProbeResult]:
         if not os.path.exists(file_path) or os.path.isdir(file_path):
@@ -278,6 +331,11 @@ class TaskManager:
                 task.probe = self.probe_file_integrity(task.output_file)
                 task.downloaded_bytes = task.probe.file_size if task.probe else os.path.getsize(task.output_file)
                 task.total_bytes = task.downloaded_bytes
+            # Persist a delivered-file manifest so the UI can group outputs per task.
+            if not task.delivered_files and task.output_file:
+                entry = self._file_entry(task.output_file, "primary", "")
+                if entry:
+                    task.delivered_files = [entry]
             task.logs.append(f"🎉 任务完成！产物文件: {task.output_file}")
         except Exception as e:
             task.status = TaskStatus.FAILED
@@ -468,6 +526,26 @@ class TaskManager:
                 task.logs.append(f"📎 附加文件: {ex['path']}" + (f"（{note[:120]}）" if note else ""))
             if final_json and final_json.get("note"):
                 task.logs.append(f"📝 agent 说明: {final_json['note'][:300]}")
+            # Build the per-task delivered-file manifest (primary first, then extras,
+            # then any other newly appeared files the agent did not explicitly list).
+            manifest = []
+            seen = set()
+            pe = self._file_entry(primary, "primary", (final_json or {}).get("note") or "")
+            if pe:
+                manifest.append(pe)
+                seen.add(os.path.realpath(primary))
+            for ex in extras:
+                ep = self._file_entry(ex["path"], "extra", ex.get("note") or "")
+                if ep and os.path.realpath(ex["path"]) not in seen:
+                    manifest.append(ep)
+                    seen.add(os.path.realpath(ex["path"]))
+            for fp in sorted(new_files, key=os.path.getsize, reverse=True):
+                if os.path.realpath(fp) in seen:
+                    continue
+                fp_entry = self._file_entry(fp, "extra", "")
+                if fp_entry:
+                    manifest.append(fp_entry)
+            task.delivered_files = manifest
         elif final_json and final_json.get("error"):
             task.logs.append(f"🚫 agent 自主收尾: {str(final_json['error'])[:400]}")
             raise RuntimeError(f"agent 自主收尾: {str(final_json['error'])[:400]}")

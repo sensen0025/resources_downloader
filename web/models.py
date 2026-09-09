@@ -55,3 +55,6 @@ class TaskInfo(BaseModel):
     probe: Optional[ProbeResult] = None
     error_message: Optional[str] = None
     logs: List[str] = Field(default_factory=list)
+    # Delivered files for this task (task-summary): each item is
+    # {path, rel_path, root, name, size, format_name, mime_type, sha256, role, note}
+    delivered_files: List[Dict[str, Any]] = Field(default_factory=list)

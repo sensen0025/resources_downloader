@@ -173,6 +173,10 @@
             placeholder="搜索..." 
             class="px-2.5 py-1 bg-dark-panel border border-dark-border rounded text-xs text-slate-200 focus:outline-none focus:border-brand-500 w-40"
           />
+          <div class="flex items-center rounded border border-dark-border overflow-hidden text-xs">
+            <button id="btn-files-view-tasks" onclick="switchFilesView('tasks')" class="px-2.5 py-1 bg-brand-500 text-dark-bg font-semibold">按任务</button>
+            <button id="btn-files-view-all" onclick="switchFilesView('all')" class="px-2.5 py-1 bg-dark-panel text-slate-300 hover:bg-dark-card">全部文件</button>
+          </div>
           <button onclick="loadFiles()" class="px-2.5 py-1 text-xs bg-dark-panel hover:bg-dark-card border border-dark-border rounded text-slate-300 transition flex items-center space-x-1">
             <i data-lucide="refresh-cw" class="w-3 h-3"></i>
             <span>刷新</span>
@@ -180,8 +184,12 @@
         </div>
       </div>
 
+      <div id="files-task-groups" class="space-y-3">
+        <!-- Task-grouped files (agent deliverables per task) -->
+      </div>
+
       <div id="files-grid" class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
-        <!-- Files dynamic -->
+        <!-- Files dynamic (flat view) -->
       </div>
 
     </div>
@@ -294,7 +302,8 @@
           headers: {'Content-Type': 'application/json'},
           body: JSON.stringify(payload)
         });
-        await res.json();
+        const created = await res.json();
+        lastSubmittedTaskId = created.id;
         
         document.getElementById('input-url').value = '';
         showToast('任务已创建');
@@ -317,6 +326,13 @@
       } catch (e) {
         console.error(e);
       }
+    }
+
+    function gotoTaskFiles(id) {
+      focusTaskId = id;
+      if (filesView !== 'tasks') switchFilesView('tasks');
+      else loadFiles();
+      switchTab('files');
     }
 
     function renderTasksList() {
@@ -379,6 +395,12 @@
               </button>
 
               <div class="flex items-center space-x-2">
+                ${(t.delivered_files && t.delivered_files.length > 0) ? `
+                  <button onclick="gotoTaskFiles('${t.id}')" class="px-2 py-0.5 bg-brand-500/15 hover:bg-brand-500/25 text-brand-400 rounded text-[11px] border border-brand-500/30 flex items-center space-x-1">
+                    <span>产出 ${t.delivered_files.length} 个文件</span>
+                    <i data-lucide="folder-down" class="w-3 h-3"></i>
+                  </button>
+                ` : ''}
                 ${t.output_file ? `
                   <button onclick="openProbeModal('${encodeURIComponent(t.output_file)}')" class="px-2 py-0.5 bg-dark-bg hover:bg-dark-card text-slate-300 rounded text-[11px] border border-dark-border">
                     探针
@@ -417,22 +439,131 @@
       }
     }
 
+    let filesView = 'tasks';      // 'tasks' = group by task | 'all' = flat
+    let focusTaskId = null;       // highlight this task group after completion jump
+    let lastSubmittedTaskId = null;
+
     async function loadFiles() {
       try {
-        const res = await fetch('/api/v1/files');
-        allFiles = await res.json();
-        renderFilesList(allFiles);
+        const [filesRes, tasksRes] = await Promise.all([fetch('/api/v1/files'), fetch('/api/v1/tasks')]);
+        allFiles = await filesRes.json();
+        const tasks = await tasksRes.json();
+        tasks.forEach(t => tasksMap[t.id] = t);
+        renderFiles();
       } catch (e) {
         console.error(e);
       }
     }
 
-    function filterFiles() {
-      const q = (document.getElementById('input-file-search').value || '').toLowerCase();
-      renderFilesList(allFiles.filter(f => f.name.toLowerCase().includes(q)));
+    function switchFilesView(v) {
+      filesView = v;
+      const btnT = document.getElementById('btn-files-view-tasks');
+      const btnA = document.getElementById('btn-files-view-all');
+      const active = 'px-2.5 py-1 bg-brand-500 text-dark-bg font-semibold';
+      const idle = 'px-2.5 py-1 bg-dark-panel text-slate-300 hover:bg-dark-card';
+      btnT.className = v === 'tasks' ? active : idle;
+      btnA.className = v === 'all' ? active : idle;
+      loadFiles();
     }
 
-    function renderFilesList(files) {
+    function renderFiles() {
+      const q = (document.getElementById('input-file-search').value || '').toLowerCase();
+      const groupBox = document.getElementById('files-task-groups');
+      const grid = document.getElementById('files-grid');
+      if (filesView === 'all') {
+        groupBox.classList.add('hidden');
+        grid.classList.remove('hidden');
+        renderFilesGrid(allFiles.filter(f => f.name.toLowerCase().includes(q)));
+      } else {
+        grid.classList.add('hidden');
+        groupBox.classList.remove('hidden');
+        renderTaskGroups(q);
+      }
+    }
+
+    function fmtTime(ts) {
+      if (!ts) return '';
+      const d = new Date(ts * 1000);
+      const p = (n) => String(n).padStart(2, '0');
+      return `${d.getFullYear()}-${p(d.getMonth()+1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+    }
+
+    function fileActions(f, isRow) {
+      const isVideo = (f.mime_type || '').startsWith('video/');
+      const isAudio = (f.mime_type || '').startsWith('audio/');
+      const enc = (s) => encodeURIComponent(s || '');
+      return `
+        <div class="flex items-center space-x-1.5 shrink-0">
+          ${(isVideo || isAudio) ? `
+            <button onclick="openPlayerModal('${enc(f.rel_path)}','${enc(f.name)}','${isVideo ? 'video' : 'audio'}','${enc(f.root)}')" class="px-2 py-0.5 bg-brand-500 hover:bg-brand-600 text-dark-bg font-semibold rounded text-[11px]">播放</button>
+          ` : ''}
+          <button onclick="openProbeModal('${enc(f.path)}')" class="px-2 py-0.5 bg-dark-bg hover:bg-dark-card text-slate-300 rounded text-[11px] border border-dark-border">探针</button>
+          <a href="/api/v1/files/download/${enc(f.rel_path)}?root=${enc(f.root)}" download class="px-2 py-0.5 bg-dark-bg hover:bg-dark-card text-slate-300 rounded text-[11px] border border-dark-border">下载</a>
+        </div>
+      `;
+    }
+
+    function renderTaskGroups(query) {
+      const box = document.getElementById('files-task-groups');
+      const tasks = Object.values(tasksMap)
+        .filter(t => Array.isArray(t.delivered_files) && t.delivered_files.length > 0)
+        .sort((a, b) => (b.completed_at || b.created_at) - (a.completed_at || a.created_at));
+
+      if (tasks.length === 0) {
+        box.innerHTML = `<div class="text-center py-10 text-slate-500 text-xs">暂无带产出的任务（跑一个下载任务后按任务分组显示）</div>`;
+        return;
+      }
+
+      box.innerHTML = tasks.map(t => {
+        const files = t.delivered_files;
+        const qf = query ? files.filter(f => f.name.toLowerCase().includes(query)) : files;
+        const isFocus = t.id === focusTaskId;
+        return `
+          <div id="task-files-group-${t.id}" class="bg-dark-panel rounded-xl border ${isFocus ? 'border-brand-500 ring-2 ring-brand-500/40' : 'border-dark-border'} overflow-hidden">
+            <div class="flex items-center justify-between gap-3 px-3.5 py-2.5 border-b border-dark-border/60 flex-wrap">
+              <div class="space-y-0.5 min-w-0">
+                <div class="flex items-center space-x-2">
+                  <span class="text-[10px] px-1.5 py-0.5 rounded bg-dark-bg text-slate-400 font-mono border border-dark-border">${t.skill_used || ''}</span>
+                  <span class="text-[10px] px-1.5 py-0.5 rounded bg-brand-500/15 text-brand-400 font-mono">${t.status === 'completed' ? '已完成' : t.status}</span>
+                  <h3 class="font-medium text-slate-100 text-xs truncate" title="${t.title || t.url_or_query}">${t.title || t.url_or_query}</h3>
+                </div>
+                <div class="text-[10px] text-slate-500 font-mono truncate">#${t.id} · ${fmtTime(t.completed_at || t.created_at)} · ${t.url_or_query}</div>
+              </div>
+              <div class="text-[10px] text-slate-500 font-mono shrink-0">${files.length} 个文件</div>
+            </div>
+            <div class="divide-y divide-dark-border/40">
+              ${qf.map(f => `
+                <div class="flex items-center justify-between gap-2 px-3.5 py-2">
+                  <div class="min-w-0 space-y-0.5">
+                    <div class="flex items-center space-x-2">
+                      <span class="text-[10px] px-1 rounded ${f.role === 'primary' ? 'bg-brand-500/15 text-brand-400' : 'bg-slate-600/30 text-slate-400'}">${f.role === 'primary' ? '主' : '附'}</span>
+                      <span class="text-xs text-slate-200 truncate" title="${f.name}">${f.name}</span>
+                    </div>
+                    <div class="text-[10px] font-mono text-slate-500 truncate">${f.format_name || ''} · ${(f.size / (1024 * 1024)).toFixed(2)} MB${f.note ? ' · ' + f.note : ''}</div>
+                  </div>
+                  ${fileActions(f)}
+                </div>
+              `).join('')}
+              ${qf.length === 0 ? '<div class="px-3.5 py-3 text-slate-500 text-[11px]">无匹配文件</div>' : ''}
+            </div>
+          </div>
+        `;
+      }).join('');
+
+      if (focusTaskId) {
+        const el = document.getElementById(`task-files-group-${focusTaskId}`);
+        if (el) {
+          el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+          setTimeout(() => { focusTaskId = null; renderFiles(); }, 5000);
+        }
+      }
+    }
+
+    function filterFiles() {
+      renderFiles();
+    }
+
+    function renderFilesGrid(files) {
       const grid = document.getElementById('files-grid');
       if (files.length === 0) {
         grid.innerHTML = `<div class="col-span-full text-center py-12 text-slate-500 text-xs">暂无文件</div>`;
@@ -460,7 +591,6 @@
               <button onclick="openProbeModal('${encodeURIComponent(f.full_path)}')" class="text-slate-400 hover:text-slate-200 text-[11px]">
                 探针
               </button>
-
               <div class="flex items-center space-x-1.5">
                 ${(isVideo || isAudio) ? `
                   <button onclick="openPlayerModal('${encodeURIComponent(f.rel_path)}', '${encodeURIComponent(f.name)}', '${isVideo ? 'video' : 'audio'}', '${f.root}')" class="px-2 py-0.5 bg-brand-500 hover:bg-brand-600 text-dark-bg font-semibold rounded text-[11px]">
@@ -567,8 +697,20 @@
       eventSource.onmessage = (event) => {
         try {
           const task = JSON.parse(event.data);
+          const prev = tasksMap[task.id];
+          const justCompleted = task.status === 'completed' && prev && prev.status !== 'completed';
+          const delivered = Array.isArray(task.delivered_files) ? task.delivered_files.length : 0;
           tasksMap[task.id] = task;
           if (currentTab === 'tasks') renderTasksList();
+          if (justCompleted) {
+            if (currentTab === 'tasks' && task.id === lastSubmittedTaskId && delivered > 0) {
+              // 任务完成 → 自动跳到文件库并高亮该任务产出组
+              showToast('✅ 任务完成，已跳到该任务的产出文件');
+              setTimeout(() => gotoTaskFiles(task.id), 600);
+            } else if (currentTab === 'files') {
+              loadFiles();
+            }
+          }
         } catch (e) {
           console.error(e);
         }
